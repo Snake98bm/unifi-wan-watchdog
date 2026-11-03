@@ -29,7 +29,66 @@ services:
       QUECTEL_USER: ${QUECTEL_USER:-}
       QUECTEL_PASSWORD: ${QUECTEL_PASSWORD:-}
 
+  # Internet probes: one per WAN, each on a VLAN the gateway routes out of that WAN only (policy-based route with
+  # the kill switch on). They get a DHCP address, listen on nothing, and only write probes/<wan>.json.
+  wan1-probe: &probe
+    image: local/wan-watchdog:1
+    container_name: wan1-probe
+    hostname: wan1-probe
+    restart: unless-stopped
+    entrypoint: ["/app/probe-entry.sh"]
+    user: "0:0"                          # root only for the DHCP client; the probe itself runs as uid 1000
+    networks:
+      wan1_probe:
+        mac_address: "02:00:00:00:01:01"   # fixed, so the DHCP lease and the UniFi client stay the same
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, CHOWN, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+    tmpfs:
+      - /tmp
+    volumes:
+      - /docker/wan-watchdog/probes:/probes
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      PROBE_WAN: wan1
+      PROBE_HOSTNAME: wan1-probe
+    healthcheck:
+      test: ["CMD", "python", "/app/probe.py", "--health"]
+      interval: 60s
+      timeout: 5s
+      start_period: 60s
+
+  wan2-probe:
+    <<: *probe
+    container_name: wan2-probe
+    hostname: wan2-probe
+    networks:
+      wan2_probe:
+        mac_address: "02:00:00:00:01:02"
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      PROBE_WAN: wan2
+      PROBE_HOSTNAME: wan2-probe
+
 networks:
   lan:
     external: true
     name: ${WATCHDOG_NETWORK:?set WATCHDOG_NETWORK in .env}
+  # The real address comes from DHCP; Docker only needs a placeholder subnet, which the probe drops at start.
+  wan1_probe:
+    driver: macvlan
+    driver_opts:
+      parent: ${WAN1_PROBE_PARENT:?set WAN1_PROBE_PARENT in .env}
+    ipam:
+      config:
+        - subnet: 169.254.201.0/30
+  wan2_probe:
+    driver: macvlan
+    driver_opts:
+      parent: ${WAN2_PROBE_PARENT:?set WAN2_PROBE_PARENT in .env}
+    ipam:
+      config:
+        - subnet: 169.254.202.0/30

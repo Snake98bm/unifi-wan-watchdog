@@ -2,6 +2,14 @@
 
 Rules
 - A WAN is "down" when UniFi says it isn't up or it has no IP. Down for DOWN_MINUTES -> reset.
+- A WAN is "offline" when its link and IP look fine but its internet probe (a small container on a VLAN that
+  the gateway routes out of that WAN only, see probe.py) got no reply at all PROBE_FAILS_OFFLINE results in a
+  row. Offline counts like down (same DOWN_MINUTES timer). A probe result is ignored when it is stale, when its
+  traffic left through another WAN (policy route broken), or when every probe fails at once (more likely a
+  local problem than every ISP).
+- The probe also works the other way: when UniFi reports a WAN down (no link / no IP) but its probe just got
+  out through that WAN's own public IP, UniFi's data is treated as stale (e.g. the Network app restarting) and
+  the down timer doesn't start.
 - A WAN with a private IP (modem lost passthrough) is re-checked; still private after
   PRIVATE_MINUTES -> reset.
 - An automatic reset first BOUNCES the gateway port (link renegotiation over the restricted SSH key, modem stays
@@ -24,6 +32,8 @@ Locking: decisions and state changes happen under self.lock; slow I/O (SSH, mode
 call) runs without it, so the web pages stay responsive. The one-WAN-at-a-time slot (self.busy) is reserved
 under the lock before the I/O starts.
 """
+import json
+import os
 import threading
 import time
 from datetime import date
@@ -38,6 +48,8 @@ EVENT_CAPTURE_EVERY = 3600        # ... but at most once an hour per WAN (AT&T's
 BOUNCE_RETRY_SECONDS = 1800       # bounce access lost while running -> re-check this often until it works
 PENDING_MAX_SECONDS = 900         # a reserved slot whose action never finished is freed after this
 EXPECTED_NETWORK = {"wan1": "wan", "wan2": "wan2"}   # UniFi's port_table network_name for each WAN
+PROBE_FAILS_OFFLINE = 2           # probe results in a row with no reply at all -> "offline"
+PROBE_STALE_SECONDS = 90          # an older probe result (or 3 probe intervals) is ignored
 
 
 def mac_vendor(mac):
@@ -78,6 +90,14 @@ class Wan:
         self.bad_checks = 0               # checks in a row that were down / private
         self.last_event_capture = None
         self.capturing = None             # background capture thread
+        # internet probe (probe.py): latest result, what the watchdog made of it, and no-reply results in a row
+        self.probe = None
+        self.probe_verdict = "off"        # off / none / unknown / ok / fail / wrong-path
+        self.probe_note = ""
+        self.probe_ts = None
+        self.probe_fails = 0
+        self.wrong_path_logged = False
+        self.stale_unifi = False          # UniFi says down but the probe proves the WAN works
 
     @property
     def fingerprint(self):
@@ -88,8 +108,12 @@ class Wan:
         return bool(self.ip) and is_private(self.ip)
 
     @property
+    def offline(self):
+        return self.probe_fails >= PROBE_FAILS_OFFLINE
+
+    @property
     def healthy(self):
-        return bool(self.up) and bool(self.ip) and not self.private
+        return self.state == "up"
 
     @property
     def state(self):
@@ -97,11 +121,14 @@ class Wan:
             return "unknown"
         if not self.up or not self.ip:
             return "down"
+        if self.offline:
+            return "offline"
         return "private" if self.private else "up"
 
     def as_dict(self, now):
         return {
             "key": self.key, "label": self.label, "port": self.port, "state": self.state,
+            "name": "WAN " + self.key[3:] if self.key.startswith("wan") else self.key,
             "ip": self.ip, "ifname": self.ifname, "link": self.link, "poe": self.poe,
             "down_for": int(now - self.down_since) if self.down_since else None,
             "private_for": int(now - self.private_since) if self.private_since else None,
@@ -109,15 +136,21 @@ class Wan:
             "cycles_today": self.cycles_today, "note": self.note,
             "problems": list(self.problems), "fingerprint": self.fingerprint,
             "port_network": self.port_network, "port_ifname": self.port_ifname, "is_uplink": self.is_uplink,
+            "probe": self.probe, "probe_verdict": self.probe_verdict, "probe_note": self.probe_note,
+            "probe_age": int(now - self.probe["ts"]) if self.probe and self.probe.get("ts") else None,
         }
 
 
 class Monitor(threading.Thread):
-    def __init__(self, cfg, client, events, settings, clock=time.time, capture=None, bouncer=None):
+    def __init__(self, cfg, client, events, settings, clock=time.time, capture=None, bouncer=None,
+                 probe_dir=None, probe_history=None):
         super().__init__(daemon=True, name="wan-monitor")
         self.cfg, self.client, self.events, self.settings, self.clock = cfg, client, events, settings, clock
         self.capture = capture    # optional: saves a modem's pages before its port is cycled
         self.bouncer = bouncer    # optional: link bounce over the restricted SSH key
+        self.probe_dir = probe_dir            # optional: where the probe containers write <wan>.json
+        self.probe_history = probe_history    # optional: store.Probes
+        self._all_probes_failing = False
         self.wans = [Wan(k, label, port, i) for i, (k, label, port) in enumerate(cfg["wans"])]
         self.lock = threading.RLock()
         self.busy = None          # {"wan", "since", "until", "what", "pending"} while a reset runs / recovers
@@ -159,6 +192,7 @@ class Monitor(threading.Thread):
             return
         now = self.clock()
         self._watch_firmware(gw.get("version"), now)          # may SSH: done before taking the lock
+        probes = {w.key: self._read_probe(w.key) for w in self.wans}
         with self.lock:
             if self.last_error:
                 self.events.add("info", None, "Gateway API reachable again")
@@ -166,8 +200,10 @@ class Monitor(threading.Thread):
             self.last_check = now
             self.gw_mac = gw.get("mac")
             ports = {p.get("port_idx"): p for p in gw.get("port_table", [])}
+            infos = {w.key: gw.get(w.key) or {} for w in self.wans}
+            verdicts = self._probe_verdicts(infos, probes, now)
             for w in self.wans:
-                self._update(w, gw.get(w.key) or {}, ports.get(w.port) or {}, now)
+                self._update(w, infos[w.key], ports.get(w.port) or {}, now, verdicts.get(w.key))
             self._release_busy(now)
             plan = self._decide(now) if self.settings.get("enabled") else None
         if plan:                                              # slow I/O runs without the lock
@@ -217,13 +253,116 @@ class Monitor(threading.Thread):
                                            f"Problems go straight to the PoE power cycle")
         return ok
 
-    # ---------- WAN state ----------
-    def _update(self, w, info, port, now):
-        up = bool(info.get("up")) if "up" in info else bool(port.get("up"))
+    # ---------- internet probes ----------
+    def _read_probe(self, key):
+        if not self.probe_dir:
+            return None
+        try:
+            with open(os.path.join(self.probe_dir, f"{key}.json")) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _wan_ip(info):
         ip = info.get("ip") or None
-        if ip in ("0.0.0.0", ""):
-            ip = None
+        return None if ip in ("0.0.0.0", "") else ip
+
+    def _probe_verdict(self, probe, ip, other_ips, now):
+        """(verdict, note) for one WAN's latest probe result."""
+        if not self.probe_dir or not self.settings.get("probe_check"):
+            return "off", ""
+        if not probe:
+            return "none", "no probe result (probe container not running?)"
+        age = now - float(probe.get("ts") or 0)
+        if age > max(PROBE_STALE_SECONDS, 3 * int(probe.get("interval") or 30)):
+            return "unknown", f"probe result is {int(age // 60)} min old - probe container stopped?"
+        state, detail = probe.get("state"), probe.get("detail") or ""
+        if state == "ok":
+            exit_ip = (probe.get("trace") or {}).get("exit_ip")
+            if exit_ip and exit_ip != ip and exit_ip in other_ips:
+                return "wrong-path", (f"probe traffic left through another WAN ({exit_ip}): check the policy "
+                                      f"route and kill switch for the probe's VLAN")
+            return "ok", detail
+        if state == "fail":
+            return "fail", detail
+        return "unknown", detail or "probe has no result yet"
+
+    def _probe_verdicts(self, infos, probes, now):
+        """{wan: (verdict, note, probe)}. If every WAN that UniFi shows up fails its probe at the same time,
+        none of them is trusted: that points at the probes / Docker host / gateway rather than every ISP."""
+        ips = {k: self._wan_ip(i) for k, i in infos.items()}
+        out = {}
+        for w in self.wans:
+            others = {ip for k, ip in ips.items() if k != w.key and ip}
+            out[w.key] = self._probe_verdict(probes.get(w.key), ips.get(w.key), others, now) + (probes.get(w.key),)
+        linked = [k for k, i in infos.items() if i.get("up") and ips.get(k) and out[k][0] in ("ok", "fail")]
+        failing = [k for k in linked if out[k][0] == "fail"]
+        if len(linked) > 1 and len(failing) == len(linked):
+            if not self._all_probes_failing:
+                self._all_probes_failing = True
+                self.events.add("warn", None, "Every internet probe is failing at once - more likely a local problem "
+                                              "(probe VLANs, Docker host, gateway) than every ISP; not acting on "
+                                              "probe results until one answers again")
+            out = {k: ("unknown", "all probes failing at once: " + v[1], v[2]) if k in failing else v
+                   for k, v in out.items()}
+        elif self._all_probes_failing and len(failing) < len(linked):
+            self._all_probes_failing = False
+            self.events.add("info", None, "Internet probes are answering again")
+        return out
+
+    @staticmethod
+    def _probe_vouches(w):
+        """The probe's latest (fresh, trusted) result reached the internet through this WAN's last known IP."""
+        if not (w.seen and w.ip and w.probe_verdict == "ok" and w.probe):
+            return False
+        return (w.probe.get("trace") or {}).get("exit_ip") == w.ip
+
+    def _track_probe(self, w, verdict):
+        verdict, note, probe = verdict or ("off", "", None)
+        w.probe_verdict, w.probe_note = verdict, note
+        w.probe = probe if verdict != "off" else None
+        new = bool(probe) and verdict != "off" and probe.get("ts") != w.probe_ts
+        if verdict != "fail":
+            w.probe_fails = 0
+        elif new:
+            w.probe_fails += 1
+        if not new:
+            return
+        w.probe_ts = probe.get("ts")
+        if verdict == "wrong-path":
+            if not w.wrong_path_logged:
+                self.events.add("error", w.key, f"{w.label}'s internet probe is not testing {w.label}: {note}. "
+                                                f"Ignoring it until that's fixed")
+                w.wrong_path_logged = True
+        elif w.wrong_path_logged:
+            w.wrong_path_logged = False
+            self.events.add("info", w.key, f"{w.label}'s internet probe goes out through {w.label} again")
+        if self.probe_history and verdict in ("ok", "fail"):
+            pings = probe.get("targets") or []
+            rtts = [p["avg_ms"] for p in pings if p.get("avg_ms") is not None]
+            self.probe_history.add(probe["ts"], w.key, verdict, sum(p.get("sent", 0) for p in pings),
+                                   sum(p.get("recv", 0) for p in pings), (sum(rtts) / len(rtts)) if rtts else None,
+                                   (probe.get("trace") or {}).get("exit_ip"))
+
+    # ---------- WAN state ----------
+    def _update(self, w, info, port, now, probe=None):
+        up = bool(info.get("up")) if "up" in info else bool(port.get("up"))
+        ip = self._wan_ip(info)
         old_state, old_ip = (w.state if w.seen else None), w.ip
+        self._track_probe(w, probe)
+        if (not up or not ip) and self._probe_vouches(w):
+            # e.g. the UniFi Network app restarting: its first report has no WAN data. The probe just got out
+            # through this WAN's own public IP, so the WAN works and UniFi's data is what's wrong.
+            if not w.stale_unifi:
+                w.stale_unifi = True
+                self.events.add("warn", w.key, f"UniFi reports {w.label} down ({'no link' if not up else 'no IP'}) "
+                                               f"but its probe is getting out through {w.ip}: treating UniFi's "
+                                               f"data as stale, not starting the down timer")
+            up, ip = True, w.ip
+        elif w.stale_unifi:
+            w.stale_unifi = False
+            self.events.add("info", w.key, f"UniFi's data for {w.label} looks normal again")
         w.up, w.ip = up, ip
         w.ifname = info.get("ifname") or w.ifname
         w.link = port.get("up")
@@ -243,7 +382,7 @@ class Monitor(threading.Thread):
             self.events.add("info", w.key, f"{w.label}'s port safety checks pass again")
             w.problems_logged = None
 
-        if w.state == "down":
+        if w.state in ("down", "offline"):
             w.down_since = w.down_since or now
         else:
             w.down_since = None
@@ -253,7 +392,7 @@ class Monitor(threading.Thread):
             w.private_since = None
         if w.healthy:
             w.bounced_at = None
-        w.bad_checks = w.bad_checks + 1 if w.state in ("down", "private") else 0
+        w.bad_checks = w.bad_checks + 1 if w.state in ("down", "offline", "private") else 0
         if w.bad_checks == EVENT_CAPTURE_CHECKS and (
                 w.last_event_capture is None or now - w.last_event_capture >= EVENT_CAPTURE_EVERY):
             w.last_event_capture = now
@@ -262,6 +401,7 @@ class Monitor(threading.Thread):
         if old_state != w.state:
             level = "info" if w.state == "up" else "warn"
             text = {"up": f"is up ({ip})", "down": "is DOWN",
+                    "offline": f"has NO INTERNET though its link and IP look fine (probe: {w.probe_note})",
                     "private": f"has a PRIVATE IP {ip} - re-checking in {self.cfg['private_minutes']} min"}
             self.events.add(level, w.key, f"{w.label} {text[w.state]}" + (
                 f" (was {old_state})" if old_state else ""))
@@ -330,7 +470,8 @@ class Monitor(threading.Thread):
 
     def _reason(self, w, now):
         if w.down_since and now - w.down_since >= self.cfg["down_minutes"] * 60:
-            return f"down for {int((now - w.down_since) // 60)} min"
+            what = "no internet" if w.state == "offline" else "down"
+            return f"{what} for {int((now - w.down_since) // 60)} min"
         if w.private_since and now - w.private_since >= self.cfg["private_minutes"] * 60:
             return f"still a private IP ({w.ip}) after {int((now - w.private_since) // 60)} min"
         return None
@@ -583,7 +724,9 @@ class Monitor(threading.Thread):
             if self.busy:
                 busy = dict(self.busy, label=self._wan(self.busy["wan"]).label,
                             left=max(0, int(self.busy["until"] - now)))
-            return {"wans": [w.as_dict(now) for w in self.wans], "busy": busy,
+            # pages list the WANs by number (WAN 1, WAN 2); self.wans stays in reset-priority order
+            return {"wans": [w.as_dict(now) for w in sorted(self.wans, key=lambda w: w.key)], "busy": busy,
+                    "first_label": self.wans[0].label if self.wans else "",
                     "last_check": self.last_check, "last_error": self.last_error, "now": now,
                     "settings": dict(self.settings.data), "cfg": self.cfg, "gw_version": self.gw_version,
                     "bounce": dict(self.bounce_access, configured=bool(self.bouncer and self.bouncer.configured())),

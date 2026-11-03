@@ -34,7 +34,7 @@
 
   {% if view == "one" %}
   <form method="get" class="toolbar">
-    {% if wans|length > 1 %}<select name="wan" onchange="this.form.submit()">{% for w in wans %}<option value="{{ w.key }}" {{ "selected" if w.key == wan }}>{{ w.label }}</option>{% endfor %}</select>{% else %}<input type="hidden" name="wan" value="{{ wan }}">{% endif %}
+    {% if wans|length > 1 %}<select name="wan" onchange="this.form.submit()">{% for w in wans %}<option value="{{ w.key }}" {{ "selected" if w.key == wan }}>{{ w.label }} (WAN {{ w.key[3:] }})</option>{% endfor %}</select>{% else %}<input type="hidden" name="wan" value="{{ wan }}">{% endif %}
     <label>Date <input type="date" name="date" value="{{ day }}" onchange="this.form.submit()"
       {% if dates %}min="{{ dates[-1] }}" max="{{ dates[0] }}"{% endif %}></label>
     {% if names %}

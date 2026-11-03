@@ -20,7 +20,7 @@ import pages as modem_pages
 from bounce import Bouncer
 from capture import Capturer, schedule_slot
 from monitor import Monitor
-from store import Events, Settings
+from store import Events, Probes, Settings
 from unifi import UniFi, UniFiError
 from version import VERSION
 
@@ -102,7 +102,11 @@ capturer = Capturer(os.path.join(DATA, "captures"), config.capture_urls(settings
 bouncer = Bouncer(os.environ.get("BOUNCE_SSH_HOST", UNIFI_URL.split("//")[-1].split(":")[0].split("/")[0]),
                   os.environ.get("BOUNCE_SSH_KEY", os.path.join(DATA, "ssh", "id_ed25519")),
                   os.path.join(DATA, "ssh", "known_hosts"))
-monitor = Monitor(cfg, client, events, settings, capture=capturer, bouncer=bouncer)
+# Internet probes: one container per WAN on a VLAN routed out of that WAN only writes probes/<wan>.json here
+PROBE_DIR = os.environ.get("PROBE_DIR", os.path.join(DATA, "probes"))
+probe_history = Probes(os.path.join(DATA, "probes.db"))
+monitor = Monitor(cfg, client, events, settings, capture=capturer, bouncer=bouncer, probe_dir=PROBE_DIR,
+                  probe_history=probe_history)
 
 
 def apply_settings():
@@ -384,7 +388,7 @@ def capture_now(key):
 
 
 def capture_wans():
-    return [w for w in monitor.wans if capturer.has(w.key)]
+    return sorted((w for w in monitor.wans if capturer.has(w.key)), key=lambda w: w.key)   # WAN 1 first
 
 
 def nice_time(name):
@@ -449,6 +453,29 @@ def captures_combined():
     return render_template("captures.html", s=monitor.snapshot(), view="combined", wans=wans, wan=wan, days=days,
                            count=len(names), page_keys=page_keys, page=page, log=log, sections=sections,
                            columns=columns)
+
+
+@app.get("/internet")
+@login_required
+def internet():
+    """Probe history per WAN: one row per hour (loss, latency, failed probes). ?days=1|7|30"""
+    try:
+        days = int(request.args.get("days") or 1)
+    except ValueError:
+        days = 1
+    days = max(1, min(days, probe_history.keep_days))
+    since = time.time() - days * 86400
+    s = monitor.snapshot()
+    hist = {w["key"]: probe_history.hourly(w["key"], since) for w in s["wans"]}
+    totals = {}
+    for key, rows in hist.items():
+        sent, recv = sum(r["sent"] for r in rows), sum(r["recv"] for r in rows)
+        rtts = [r["avg_ms"] for r in rows if r["avg_ms"] is not None]
+        totals[key] = {"checks": sum(r["checks"] for r in rows), "failed": sum(r["failed"] for r in rows),
+                       "loss": round(100 * (1 - recv / sent), 2) if sent else None,
+                       "avg_ms": round(sum(rtts) / len(rtts), 1) if rtts else None,
+                       "worst_ms": max((r["worst_ms"] for r in rows if r["worst_ms"] is not None), default=None)}
+    return render_template("internet.html", s=s, hist=hist, totals=totals, days=days)
 
 
 @app.get("/captures/<name>/text")

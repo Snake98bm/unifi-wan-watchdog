@@ -36,6 +36,10 @@ FIELDS = {
                            "0 = never power-cycle automatically."),
     "first_wan": ("Reset rules", "If both need it, reset first", "wan", "wan2", None, None,
                   "Only one WAN is ever reset at a time."),
+    "probe_check": ("Internet check", "Use the internet probes", "bool", True, None, None,
+                    "On = a WAN whose probe (on a VLAN routed out of that WAN only) gets no reply twice in a row "
+                    "counts as offline even when its link and IP look fine, and is reset after the same 'Down "
+                    "for' time. Off = probes are only shown and logged."),
     "bounce_wait_minutes": ("Port bounce", "Wait after a bounce before the power cycle (minutes)", "int", 3, 1, 30, ""),
     "capture_schedule": ("Modem logs", "Save modem logs", "schedule", "hourly", None, None,
                          "Pages are always saved before a power cycle as well."),
@@ -75,7 +79,7 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Port bounce", "Modem logs", "WANs"]
+GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "Modem logs", "WANs"]
 
 
 def _from_env(key, kind):

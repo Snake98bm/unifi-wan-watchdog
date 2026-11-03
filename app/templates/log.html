@@ -5,7 +5,7 @@
   <form method="get" style="margin-bottom: 10px;">
     <select name="wan" onchange="this.form.submit()">
       <option value="">All WANs</option>
-      {% for w in s.wans %}<option value="{{ w.key }}" {{ "selected" if wan == w.key }}>{{ w.label }}</option>{% endfor %}
+      {% for w in s.wans %}<option value="{{ w.key }}" {{ "selected" if wan == w.key }}>{{ w.label }} ({{ w.name }})</option>{% endfor %}
     </select>
     <select name="level" onchange="this.form.submit()">
       <option value="">All levels</option>

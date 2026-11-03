@@ -23,6 +23,16 @@ class WebTests(unittest.TestCase):
             self.assertEqual(main.safe_next(unquote(bad)), "/", bad)
         self.assertEqual(main.safe_next("/captures?wan=wan1"), "/captures?wan=wan1")
 
+    def test_internet_page_and_dashboard_render(self):
+        self.login("/")
+        main.probe_history.add(main.time.time() - 60, "wan2", "ok", 6, 5, 41.5, "198.51.100.20")
+        main.probe_history.add(main.time.time() - 30, "wan2", "fail", 6, 0, None, None)
+        for url in ("/internet", "/internet?days=7", "/internet?days=x", "/"):
+            r = self.c.get(url)
+            self.assertEqual(r.status_code, 200, url)
+        body = self.c.get("/internet").get_data(as_text=True)
+        self.assertIn("58.33%", body)                     # 7 of 12 pings lost over the period
+
     def test_login_redirect_stays_on_site(self):
         r = self.login("/%5Cevil.example")
         self.assertEqual(r.status_code, 302)

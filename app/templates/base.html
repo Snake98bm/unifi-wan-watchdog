@@ -30,6 +30,10 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 .pill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; color: #fff; text-transform: uppercase; }
 .pill.up { background: var(--up); } .pill.down { background: var(--down); }
 .pill.private { background: var(--warn); } .pill.unknown { background: var(--muted); }
+.pill.offline { background: var(--down); }
+.wan-name { font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
+.good { color: var(--up); } .bad { color: var(--down); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
 dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
 .note { color: var(--warn); margin: 6px 0; }
@@ -60,6 +64,7 @@ label { margin-right: 14px; }
   <nav>
     <a href="{{ url_for('dashboard') }}">Status</a>
     <a href="{{ url_for('log') }}">Log</a>
+    <a href="{{ url_for('internet') }}">Internet</a>
     <a href="{{ url_for('captures') }}">Modem logs</a>
     <a href="{{ url_for('all_settings') }}">Settings</a>
     <a href="{{ url_for('diag') }}">Diagnostics</a>

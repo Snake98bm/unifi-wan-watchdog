@@ -38,6 +38,49 @@ class Events:
             return [dict(zip(("ts", "level", "wan", "message"), row)) for row in db.execute(sql, args)]
 
 
+class Probes:
+    """History of the internet probes (one row per probe result per WAN), for the Internet page."""
+
+    def __init__(self, path, keep_days=30):
+        self.path, self.keep_days = path, keep_days
+        self.lock = threading.Lock()
+        self.added = 0
+        with self._db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS probes (ts REAL, wan TEXT, verdict TEXT, sent INTEGER, "
+                       "recv INTEGER, avg_ms REAL, exit_ip TEXT)")
+            db.execute("CREATE INDEX IF NOT EXISTS probes_ts ON probes (ts)")
+        self.prune()
+
+    def _db(self):
+        return sqlite3.connect(self.path, timeout=10)
+
+    def prune(self):
+        with self.lock, self._db() as db:
+            db.execute("DELETE FROM probes WHERE ts < ?", (time.time() - self.keep_days * 86400,))
+
+    def add(self, ts, wan, verdict, sent, recv, avg_ms, exit_ip):
+        with self.lock, self._db() as db:
+            db.execute("INSERT INTO probes VALUES (?, ?, ?, ?, ?, ?, ?)", (ts, wan, verdict, sent, recv, avg_ms, exit_ip))
+        self.added += 1
+        if self.added % 2000 == 0:          # about once a day per WAN at one result every 30 s
+            self.prune()
+
+    def hourly(self, wan, since):
+        """[{hour, checks, sent, recv, loss, avg_ms, worst_ms, failed}] newest first (hour = epoch of its start)."""
+        sql = ("SELECT CAST(ts / 3600 AS INTEGER) * 3600 AS hour, COUNT(*), SUM(sent), SUM(recv), AVG(avg_ms), "
+               "MAX(avg_ms), SUM(verdict = 'fail') FROM probes WHERE wan = ? AND ts >= ? "
+               "GROUP BY hour ORDER BY hour DESC")
+        with self.lock, self._db() as db:
+            rows = db.execute(sql, (wan, since)).fetchall()
+        out = []
+        for hour, checks, sent, recv, avg, worst, failed in rows:
+            out.append({"hour": hour, "checks": checks, "sent": sent or 0, "recv": recv or 0,
+                        "loss": round(100 * (1 - (recv or 0) / sent), 1) if sent else None,
+                        "avg_ms": round(avg, 1) if avg is not None else None,
+                        "worst_ms": round(worst, 1) if worst is not None else None, "failed": failed or 0})
+        return out
+
+
 class Settings:
     def __init__(self, path, defaults):
         self.path = path

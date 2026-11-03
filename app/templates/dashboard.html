@@ -23,12 +23,14 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
 <div class="cards">
 {% for w in s.wans %}
   <div class="card">
-    <h2>{{ w.label }} <span class="pill {{ w.state }}">{{ w.state }}</span></h2>
+    <h2><span>{{ w.label }} <span class="wan-name">{{ w.name }}</span></span> <span class="pill {{ w.state }}">{{ w.state }}</span></h2>
     <dl>
       <dt>IP</dt><dd>{{ w.ip or "none" }}</dd>
       <dt>Gateway port</dt><dd>{{ w.port }}{% if w.ifname %} ({{ w.ifname }}){% endif %} &middot; link {{ "up" if w.link else ("down" if w.link is not none else "?") }}</dd>
       <dt>PoE</dt><dd>{% if w.poe %}{{ w.poe.mode or "?" }}{% if w.poe.power %}, {{ w.poe.power }} W{% endif %}{% else %}?{% endif %}</dd>
-      {% if w.down_for is not none %}<dt>Down for</dt><dd>{{ w.down_for|dur }} (cycle after {{ s.cfg.down_minutes }} min)</dd>{% endif %}
+      {% if w.probe_verdict != "off" %}<dt>Internet</dt><dd>{% if w.probe_verdict == "ok" %}<span class="good">OK</span>{% elif w.probe_verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif w.probe_verdict == "wrong-path" %}<span class="bad">WRONG PATH</span>{% else %}{{ w.probe_verdict }}{% endif %}
+        &middot; {{ w.probe_note }}{% if w.probe and w.probe.ip %} <span class="muted">(probe {{ w.probe.ip }}{% if w.probe_age is not none %}, {{ w.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>{% endif %}
+      {% if w.down_for is not none %}<dt>{{ "No internet for" if w.state == "offline" else "Down for" }}</dt><dd>{{ w.down_for|dur }} (reset after {{ s.cfg.down_minutes }} min)</dd>{% endif %}
       {% if w.private_for is not none %}<dt>Private for</dt><dd>{{ w.private_for|dur }} (cycle after {{ s.cfg.private_minutes }} min)</dd>{% endif %}
       <dt>Last bounce</dt><dd>{{ w.last_bounce|when }}</dd>
       <dt>Last cycle</dt><dd>{{ w.last_cycle|when }}</dd>
@@ -107,8 +109,8 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
       {% endif %}
       <button class="primary">Save</button>
     </form>
-    <p class="muted">Only one WAN is reset at a time; if both need it, {{ s.wans[0].label }} goes first.
-      Acts after {{ s.cfg.down_minutes }} min down or {{ s.cfg.private_minutes }} min on a private IP.
+    <p class="muted">Only one WAN is reset at a time; if both need it, {{ s.first_label }} goes first.
+      Acts after {{ s.cfg.down_minutes }} min down{% if s.settings.probe_check %} or without internet{% endif %}, or {{ s.cfg.private_minutes }} min on a private IP.
       Cooldown {{ s.cfg.cooldown_minutes }} min, recovery window {{ s.cfg.recovery_minutes }} min.
       Last check: {{ s.last_check|when }}. <a href="{{ url_for('all_settings') }}">All settings</a></p>
   </div>
