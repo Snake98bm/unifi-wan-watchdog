@@ -1,5 +1,5 @@
 FROM python:3.13-alpine
-LABEL org.opencontainers.image.title="wan-watchdog" org.opencontainers.image.version="1.0"
+LABEL org.opencontainers.image.title="wan-watchdog" org.opencontainers.image.version="1.1"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
 RUN apk add --no-cache openssh-client && adduser -D -u 1000 app && mkdir /data && chown app:app /data
 WORKDIR /app
