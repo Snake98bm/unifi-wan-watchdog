@@ -235,7 +235,7 @@ def save_settings(form, partial):
         parts = []
         for k, v in changed.items():
             label = config.FIELDS[k][1]
-            if config.FIELDS[k][2] == "urls":
+            if config.FIELDS[k][2] in ("urls", "weburls"):
                 parts.append(f"{label} changed")
             else:
                 parts.append(f"{label}: {old.get(k)} -> {v}")
@@ -345,6 +345,14 @@ def relearn(key):
 @login_required
 def bounce(key):
     ok, msg = monitor.manual_bounce(key)
+    flash(msg, "ok" if ok else "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/vpn/restart")
+@login_required
+def vpn_restart():
+    ok, msg = monitor.manual_vpn_restart()
     flash(msg, "ok" if ok else "error")
     return redirect(url_for("dashboard"))
 
@@ -467,6 +475,8 @@ def internet():
     since = time.time() - days * 86400
     s = monitor.snapshot()
     hist = {w["key"]: probe_history.hourly(w["key"], since) for w in s["wans"]}
+    if s["vpn"]["watched"]:
+        hist["vpn"] = probe_history.hourly("vpn", since)
     totals = {}
     for key, rows in hist.items():
         sent, recv = sum(r["sent"] for r in rows), sum(r["recv"] for r in rows)

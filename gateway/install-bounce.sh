@@ -1,16 +1,18 @@
 #!/bin/sh
 # Install the wan-watchdog "bounce" access on a UniFi Dream Machine. Run as root on the gateway, passing the
-# watchdog's PUBLIC key (data/ssh/id_ed25519.pub) and the gateway's WAN interfaces:
-#   ssh root@<gateway> "WATCHDOG_PUBKEY='ssh-ed25519 AAAA... wan-watchdog' WAN_IFACES='eth8 eth9' sh" < install-bounce.sh
+# watchdog's PUBLIC key (data/ssh/id_ed25519.pub), the gateway's WAN interfaces and (optional) the tunnel
+# interfaces of the UniFi OpenVPN clients the watchdog may reconnect:
+#   ssh root@<gateway> "WATCHDOG_PUBKEY='ssh-ed25519 AAAA... wan-watchdog' WAN_IFACES='eth8 eth9' VPN_IFACES='tunovpnc1' sh" < install-bounce.sh
 # Windows PowerShell:
-#   Get-Content install-bounce.sh -Raw | ssh root@<gateway> "tr -d '\r' | WATCHDOG_PUBKEY='...' WAN_IFACES='eth8 eth9' sh"
+#   Get-Content install-bounce.sh -Raw | ssh root@<gateway> "tr -d '\r' | WATCHDOG_PUBKEY='...' WAN_IFACES='eth8 eth9' VPN_IFACES='tunovpnc1' sh"
 # Undo: run it with "sh -s remove" instead of "sh" (WATCHDOG_PUBKEY is still needed to find the key line).
 #
 # What it does:
 #  - writes /data/wan-watchdog/wan-bounce.sh: the ONLY thing the watchdog's SSH key can run.
 #    It accepts "check", "bounce <if>" (verified link drop), "bounce-long <if>" (link down 5 s, then up)
 #    and "wanlog <if>" (read-only: recent syslog lines about that port), only for the interfaces in
-#    WAN_IFACES. Anything else is refused. Every request is logged to syslog with the tag wan-watchdog.
+#    WAN_IFACES, plus "vpnrestart <tun>" (reconnect that OpenVPN client) only for the ones in VPN_IFACES.
+#    Anything else is refused. Every request is logged to syslog with the tag wan-watchdog.
 #  - adds the watchdog's public key to /root/.ssh/authorized_keys, locked to that script
 #    (command=..., no shell, no pty, no forwarding). Your own keys are left alone.
 # /data and /root survived a firmware update on a UDM SE. If an update ever drops the key, the watchdog logs it
@@ -24,6 +26,9 @@ TAG=$(echo "$KEY" | awk '{print $3}')
 [ -n "$TAG" ] || { echo "WATCHDOG_PUBKEY needs a comment at the end (e.g. wan-watchdog)"; exit 1; }
 IFACES="${WAN_IFACES:-eth8 eth9}"
 for i in $IFACES; do case "$i" in eth[0-9]|eth[0-9][0-9]) ;; *) echo "WAN_IFACES: bad interface '$i'"; exit 1 ;; esac; done
+VPNS="${VPN_IFACES:-}"
+for i in $VPNS; do case "$i" in tun*[!a-z0-9]*|tun) echo "VPN_IFACES: bad interface '$i'"; exit 1 ;; tun*) ;;
+  *) echo "VPN_IFACES: bad interface '$i'"; exit 1 ;; esac; done
 
 # every authorized_keys line except the watchdog's (its key comment is the last field; exact match, no regex,
 # and awk succeeds even when nothing is left)
@@ -43,14 +48,17 @@ fi
 mkdir -p $D
 cat > $D/wan-bounce.sh <<'EOS'
 #!/bin/sh
-# Forced command for the wan-watchdog SSH key. Allowed: check | bounce <if> | bounce-long <if> | wanlog <if>
+# Forced command for the wan-watchdog SSH key.
+# Allowed: check | bounce <if> | bounce-long <if> | wanlog <if> | vpnrestart <tun>
 # bounce: renegotiate the link (ethtool -r) and VERIFY it dropped and came back (carrier_changes +2
 # and carrier up). If it didn't drop, or didn't come back within 15 s, try link down 5 s / up once.
 # Takes at most ~45 s. Exit codes: 0 = verified, 2 = refused, 3 = link not back up, 4 = never dropped.
 ALLOWED="eth8 eth9"   # replaced by WAN_IFACES when installed
+VPN_ALLOWED=""        # replaced by VPN_IFACES when installed (empty = vpnrestart is always refused)
 set -- $SSH_ORIGINAL_COMMAND
 logger -t wan-watchdog "request from ${SSH_CLIENT%% *}: $SSH_ORIGINAL_COMMAND"
 allowed() { for i in $ALLOWED; do [ "$i" = "$1" ] && return 0; done; return 1; }
+vpn_allowed() { for i in $VPN_ALLOWED; do [ "$i" = "$1" ] && return 0; done; return 1; }
 N=/sys/class/net
 changes() { cat $N/$1/carrier_changes 2>/dev/null || echo 0; }
 carrier() { cat $N/$1/carrier 2>/dev/null || echo 0; }
@@ -100,11 +108,41 @@ case "$1" in
       | grep -a -E "(^|[^a-z0-9])$2([^0-9]|\$)|wan-failover-group" | grep -a -v "wan-watchdog\[[0-9]*\]: request from" \
       | grep -a -v -E "$NOISE" | tail -n 200 | cut -c1-300
     exit 0 ;;
+  vpnrestart)
+    # Reconnect a UniFi OpenVPN client. SIGUSR1 makes OpenVPN drop the connection, look the server name up
+    # again and reconnect, often to another server (new exit IP). The policy route's kill switch stays in place
+    # meanwhile. UniFi's client configs have no persist-tun, so a reconnect re-creates the tunnel device:
+    # done = a new device (other ifindex) with an IPv4 address.
+    # Exit codes: 0 = reconnected, 2 = refused, 3 = not back within 60 s, 5 = that OpenVPN client isn't running.
+    vpn_allowed "$2" && [ $# -eq 2 ] || { echo "refused"; exit 2; }
+    cfg=$(grep -l -x -F -e "--dev $2" /etc/openvpn/*/config.* 2>/dev/null | head -n 1)
+    [ -n "$cfg" ] || { echo "no OpenVPN client config for $2"; exit 5; }
+    # UniFi may start a new OpenVPN process for it, so the process is looked up again each time
+    vpid() { for p in $(pidof openvpn); do
+      tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q -F -e "--config $cfg " && { echo $p; return; }; done; }
+    vpeer() { [ -n "$1" ] && ss -tunpH 2>/dev/null | grep -F "pid=$1," | awk '{print $6}' | head -n 1; }
+    p=$(vpid)
+    [ -n "$p" ] || { echo "the OpenVPN client for $2 isn't running"; exit 5; }
+    old=$(vpeer "$p"); idx=$(cat $N/$2/ifindex 2>/dev/null || echo 0)
+    note "reconnecting OpenVPN $2 (pid $p, server ${old:-?})"
+    kill -USR1 "$p"
+    i=0; back=0
+    while [ $i -lt 60 ]; do sleep 1; i=$((i + 1))
+      n=$(cat $N/$2/ifindex 2>/dev/null || echo 0)
+      if [ "$n" != 0 ] && [ "$n" != "$idx" ] && ip -4 addr show dev "$2" 2>/dev/null | grep -q inet; then
+        back=1; break; fi
+    done
+    new=$(vpeer "$(vpid)")
+    if [ $back = 1 ]; then msg="$2 reconnected after ${i}s, server ${old:-?} -> ${new:-?}"
+    else msg="$2 NOT back after ${i}s (server was ${old:-?})"; fi
+    note "$msg"; echo "$msg"
+    [ $back = 1 ] || exit 3
+    exit 0 ;;
   *)
     echo "refused"; exit 2 ;;
 esac
 EOS
-sed -i "s/^ALLOWED=.*/ALLOWED=\"$IFACES\"/" $D/wan-bounce.sh
+sed -i -e "s/^ALLOWED=.*/ALLOWED=\"$IFACES\"/" -e "s/^VPN_ALLOWED=.*/VPN_ALLOWED=\"$VPNS\"/" $D/wan-bounce.sh
 chown root:root $D $D/wan-bounce.sh
 chmod 755 $D $D/wan-bounce.sh
 
@@ -116,6 +154,6 @@ touch $AK && chmod 600 $AK
 others > "$AK.tmp"
 echo "$LINE" >> $AK.tmp
 cat $AK.tmp > $AK && rm -f $AK.tmp
-echo "Installed $D/wan-bounce.sh for: $IFACES"
+echo "Installed $D/wan-bounce.sh for: $IFACES${VPNS:+ (VPN reconnect: $VPNS)}"
 echo "authorized_keys now has $(wc -l < $AK) key(s); watchdog key locked to wan-bounce.sh"
 echo "Backup of the previous file: $AK.bak-wan-watchdog"

@@ -17,6 +17,13 @@ why the line went down.
 - **Down, offline, or stuck on a private IP for 5 min** (a modem that lost IP passthrough) → reset:
   1. bounce the gateway port (link down 5 s, modem stays powered), verified on the gateway;
   2. still bad after 3 min → PoE power-cycle the port.
+- **VPN watch (optional):** a third probe on a VLAN that the gateway routes through a UniFi OpenVPN client only.
+  When it gets no reply for 2 min, or when a ban-check site (Settings page, checked hourly) shows Cloudflare's
+  "The owner of this website has banned your IP address" page (error 1006), the watchdog reconnects the OpenVPN
+  client over the restricted SSH key. The reconnect looks the VPN server's name up again, which usually gives a
+  new exit IP; the sites are checked again right after. It waits while a WAN is being reset or the primary WAN
+  is unhealthy, has its own cooldown and daily limit, and logs an error (no reconnect) if the probe's traffic
+  ever leaves through a WAN directly (broken kill switch).
 - **Never resets both WANs at once**; if both need it, the WAN you choose goes first.
 - **Safety checks before every reset:** the port must belong to that WAN in UniFi, match the WAN's interface,
   and the modem on it must match the fingerprint learned while it was healthy (PoE class and MAC vendor), so
@@ -47,10 +54,10 @@ why the line went down.
    ssh-keygen -t ed25519 -N "" -C wan-watchdog -f /docker/wan-watchdog/ssh/id_ed25519
    chown -R 1000:1000 /docker/wan-watchdog
    ```
-4. **Install the bounce access on the gateway.** It allows only check / bounce / wanlog for your WAN interfaces,
-   locked with `command=` in `authorized_keys`:
+4. **Install the bounce access on the gateway.** It allows only check / bounce / wanlog for your WAN interfaces
+   (and vpnrestart for the VPN tunnels in `VPN_IFACES`, if any), locked with `command=` in `authorized_keys`:
    ```sh
-   ssh root@<gateway> "WATCHDOG_PUBKEY='$(cat /docker/wan-watchdog/ssh/id_ed25519.pub)' WAN_IFACES='eth8 eth9' sh" < gateway/install-bounce.sh
+   ssh root@<gateway> "WATCHDOG_PUBKEY='$(cat /docker/wan-watchdog/ssh/id_ed25519.pub)' WAN_IFACES='eth8 eth9' VPN_IFACES='' sh" < gateway/install-bounce.sh
    ```
 5. **`.env`:** copy `.env.example` to `.env` and fill it in. `.env` is in `.gitignore`; never commit it.
 6. **Start:** `docker compose up -d`, then open `http://<WATCHDOG_IP>:8080`. It starts in **dry run**.
@@ -59,6 +66,10 @@ why the line went down.
    interface for each (no IP needed), and set `WAN1_PROBE_PARENT` / `WAN2_PROBE_PARENT` in `.env`. The
    `wan1-probe` / `wan2-probe` containers get a DHCP address there, listen on nothing, and write
    `probes/<wan>.json` into the data folder. Without them, leave the two services out of the compose file.
+   **VPN probe:** the same for a VLAN whose policy-based route goes through your UniFi VPN client (kill switch
+   on): set `VPN_PROBE_PARENT`, then on the Settings page the VPN's tunnel interface (`ip link` on the gateway,
+   e.g. `tunovpnc1`) and the ban-check sites. To let the watchdog reconnect it, run install-bounce.sh with
+   `VPN_IFACES='tunovpnc1'` as well. Without a VPN, leave `vpn-probe` out.
 8. **Modems behind the gateway:** the watchdog has to reach the modem's own address (e.g. `192.168.1.254`)
    through the right WAN. Add a UniFi policy-based route for that address via that WAN, with the watchdog's
    network as a source.
@@ -68,7 +79,7 @@ why the line went down.
 ```sh
 docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint python local/wan-watchdog:1 /tests/test_monitor.py
 ```
-(also `test_probe`, `test_config`, `test_capture`, `test_pages`, `test_atparse`, `test_unifi`, `test_bounce`, `test_main`).
+(also `test_probe`, `test_vpn`, `test_config`, `test_capture`, `test_pages`, `test_atparse`, `test_unifi`, `test_bounce`, `test_main`).
 
 ## Notes
 

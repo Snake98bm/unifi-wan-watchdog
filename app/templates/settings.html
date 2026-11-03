@@ -60,6 +60,12 @@ textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-
         <label for="{{ key }}" class="wide">{{ f[1] }}
           {% set wk = key.split("_")[1] %}<span class="default">&middot; login {{ "set" if codes.get(wk) else "not set" }}</span></label>
         <div class="wide"><textarea id="{{ key }}" name="{{ key }}" spellcheck="false">{{ values[key] }}</textarea></div>
+      {% elif kind == "weburls" %}
+        <label for="{{ key }}" class="wide">{{ f[1] }}</label>
+        <div class="wide"><textarea id="{{ key }}" name="{{ key }}" spellcheck="false" style="min-height: 60px;">{{ values[key] }}</textarea></div>
+      {% elif kind == "tun" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><input type="text" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" maxlength="15" spellcheck="false" placeholder="tunovpnc1"></div>
       {% endif %}
       {% if f[6] %}<div class="help">{{ f[6] }}</div>{% endif %}
     {% endfor %}

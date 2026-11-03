@@ -40,6 +40,24 @@ FIELDS = {
                     "On = a WAN whose probe (on a VLAN routed out of that WAN only) gets no reply twice in a row "
                     "counts as offline even when its link and IP look fine, and is reset after the same 'Down "
                     "for' time. Off = probes are only shown and logged."),
+    "vpn_check": ("VPN", "Watch the VPN", "bool", True, None, None,
+                  "Needs the vpn-probe container (on a VLAN routed through the VPN only, kill switch on). On = the "
+                  "VPN is reconnected when its probe gets no reply for the time below, or when a ban-check site "
+                  "shows Cloudflare's 'banned your IP address' page. Off = only shown and logged."),
+    "vpn_label": ("VPN", "VPN name", "text", "VPN", None, None, ""),
+    "vpn_iface": ("VPN", "VPN tunnel interface on the gateway", "tun", "", None, None,
+                  "The UniFi OpenVPN client's interface, e.g. tunovpnc1 (ip link on the gateway). It must also be "
+                  "in VPN_IFACES when install-bounce.sh is run. Empty = never reconnect."),
+    "vpn_ban_urls": ("VPN", "Ban-check sites", "weburls", "", None, None,
+                     "One URL per line (at most 4), fetched through the VPN. Cloudflare's 'The owner of this website "
+                     "has banned your IP address' page (error 1006) on any of them = reconnect for a new exit IP."),
+    "vpn_ban_minutes": ("VPN", "Check the sites every (minutes)", "int", 60, 5, 1440,
+                        "Hourly by default, so the sites aren't hammered. One extra check runs right after each "
+                        "reconnect, to see whether the new exit IP is banned too."),
+    "vpn_down_minutes": ("VPN", "No internet for (minutes) before reconnecting", "int", 2, 1, 60, ""),
+    "vpn_cooldown_minutes": ("VPN", "Wait between reconnects (minutes)", "int", 5, 2, 1440, ""),
+    "vpn_max_restarts_per_day": ("VPN", "Max reconnects per day", "int", 24, 0, 96,
+                                 "0 = never reconnect automatically."),
     "bounce_wait_minutes": ("Port bounce", "Wait after a bounce before the power cycle (minutes)", "int", 3, 1, 30, ""),
     "capture_schedule": ("Modem logs", "Save modem logs", "schedule", "hourly", None, None,
                          "Pages are always saved before a power cycle as well."),
@@ -79,7 +97,9 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "Modem logs", "WANs"]
+GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "WANs"]
+WEB_URL_RE = re.compile(r"^https?://[^\s/]+(/\S*)?$")
+MAX_BAN_URLS = 4
 
 
 def _from_env(key, kind):
@@ -92,7 +112,7 @@ def _from_env(key, kind):
         return None
     if kind == "bool":
         return raw.strip().lower() in ("1", "true", "yes", "on")
-    if kind == "urls":
+    if kind in ("urls", "weburls"):
         return "\n".join(u.strip() for u in raw.split(",") if u.strip())
     return raw
 
@@ -160,6 +180,22 @@ def validate(form, partial=True):
                 errors.append(f"{label}: not a URL or at:AT command: {bad[0]}")
                 continue
             clean[key] = "\n".join(items)
+        elif kind == "weburls":
+            items = [u.strip() for u in str(raw).replace("\r", "").split("\n") if u.strip()]
+            bad = [u for u in items if not WEB_URL_RE.match(u)]
+            if bad:
+                errors.append(f"{label}: not a http(s) URL: {bad[0]}")
+                continue
+            if len(items) > MAX_BAN_URLS:
+                errors.append(f"{label}: at most {MAX_BAN_URLS}")
+                continue
+            clean[key] = "\n".join(items)
+        elif kind == "tun":
+            v = str(raw).strip()
+            if v and not re.fullmatch(r"tun[a-z0-9]{1,12}", v):
+                errors.append(f"{label}: must look like tunovpnc1 (or be empty)")
+                continue
+            clean[key] = v
         elif kind == "aturl":
             v = str(raw).strip()
             if v and not (re.match(r"^https?://[^\s/]+(/\S*)?$", v) and "{AT}" in v
@@ -181,6 +217,10 @@ def monitor_cfg(values):
     keys = ("check_interval", "down_minutes", "private_minutes", "recovery_minutes", "cooldown_minutes",
             "max_cycles_per_day", "bounce_wait_minutes", "capture_keep_days")
     return {**{k: int(values[k]) for k in keys}, "wans": wans_of(values)}
+
+
+def ban_urls(values):
+    return [u for u in str(values.get("vpn_ban_urls") or "").split("\n") if u.strip()][:MAX_BAN_URLS]
 
 
 def capture_urls(values):

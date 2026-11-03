@@ -65,6 +65,35 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
     {% endif %}
   </div>
 {% endfor %}
+{% if s.vpn.watched %}{% set v = s.vpn %}
+  <div class="card">
+    <h2><span>{{ v.label }} <span class="wan-name">VPN</span></span> <span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(v.state, 'unknown') }}">{{ v.state }}</span></h2>
+    <dl>
+      <dt>Exit IP</dt><dd>{{ v.exit_ip or "?" }}</dd>
+      <dt>Internet</dt><dd>{% if v.verdict == "ok" %}<span class="good">OK</span>{% elif v.verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif v.verdict == "banned" %}<span class="bad">BANNED</span>{% elif v.verdict == "leak" %}<span class="bad">NOT THROUGH THE VPN</span>{% else %}{{ v.verdict }}{% endif %}
+        &middot; {{ v.note }}{% if v.probe and v.probe.ip %} <span class="muted">(probe {{ v.probe.ip }}{% if v.probe_age is not none %}, {{ v.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>
+      <dt>Ban check</dt><dd>{% if v.ban %}{% for site in v.ban.sites %}<div>{% if site.banned %}<span class="bad">BANNED</span>{% elif site.banned is none %}<span class="muted">couldn't check</span>{% else %}<span class="good">OK</span>{% endif %} {{ site.url }} <span class="muted">{{ site.detail }}</span></div>{% endfor %}<span class="muted">checked {{ v.ban.ts|when }}, every {{ s.settings.vpn_ban_minutes }} min</span>{% else %}<span class="muted">no sites set (Settings) or not checked yet</span>{% endif %}</dd>
+      {% if v.offline_for is not none %}<dt>No internet for</dt><dd>{{ v.offline_for|dur }} (reconnect after {{ s.settings.vpn_down_minutes }} min)</dd>{% endif %}
+      <dt>Tunnel</dt><dd>{{ v.iface or "not set" }}</dd>
+      <dt>Last reconnect</dt><dd>{{ v.last_restart|when }}</dd>
+      <dt>Reconnects today</dt><dd>{{ v.restarts_today }} of {{ s.settings.vpn_max_restarts_per_day }}</dd>
+    </dl>
+    {% if v.action_note %}<p class="note">{{ v.action_note }}</p>{% endif %}
+    {% if v.iface and s.bounce.ok %}
+    <p><button type="button" class="danger" onclick="document.getElementById('dlg-vpn').showModal()">Reconnect {{ v.label }}&hellip;</button></p>
+    <dialog id="dlg-vpn">
+      <h3>Reconnect {{ v.label }}?</h3>
+      <p>OpenVPN {{ v.iface }} drops and reconnects (usually a new exit IP). Traffic on the VPN networks stops for a few seconds; the kill switch keeps it off the WANs.</p>
+      {% if v.restarting %}<p class="warn">&#9888; A reconnect is already running: this will be refused.</p>{% endif %}
+      <form method="post" action="{{ url_for('vpn_restart') }}" class="row">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
+        <button class="danger">Reconnect</button>
+      </form>
+    </dialog>
+    {% endif %}
+  </div>
+{% endif %}
   <div class="card">
     <h2>Port bounce
       {% if not s.bounce.configured %}<span class="pill unknown">no key</span>

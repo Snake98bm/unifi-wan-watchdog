@@ -7,6 +7,7 @@
     <select name="wan" onchange="this.form.submit()">
       <option value="">All WANs</option>
       {% for w in s.wans %}<option value="{{ w.key }}" {{ "selected" if wan == w.key }}>{{ w.label }} ({{ w.name }})</option>{% endfor %}
+      {% if s.vpn.watched %}<option value="vpn" {{ "selected" if wan == "vpn" }}>{{ s.vpn.label }} (VPN)</option>{% endif %}
     </select>
     <select name="level" onchange="this.form.submit()">
       <option value="">All levels</option>

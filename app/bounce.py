@@ -1,7 +1,7 @@
 """Port bounce over SSH using the watchdog's restricted key.
 
 On the gateway the key is locked to /data/wan-watchdog/wan-bounce.sh (see gateway/install-bounce.sh),
-which only accepts: check | bounce <if> | bounce-long <if> | wanlog <if>.
+which only accepts: check | bounce <if> | bounce-long <if> | wanlog <if> | vpnrestart <tun>.
 """
 import os
 import subprocess
@@ -54,6 +54,11 @@ class Bouncer:
     def bounce(self, ifname):
         """(exit code, report). 0 = link dropped and came back up (verified on the gateway)."""
         return self.run("bounce", ifname)
+
+    def vpn_restart(self, tun):
+        """(exit code, report). 0 = the OpenVPN client reconnected (new tunnel device with an address).
+        5 = no such OpenVPN client running on the gateway."""
+        return self.run("vpnrestart", tun)
 
     def wanlog(self, ifname):
         """(exit code, text): the gateway's recent syslog lines about this WAN port (read-only)."""

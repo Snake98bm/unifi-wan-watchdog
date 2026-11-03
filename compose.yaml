@@ -28,6 +28,10 @@ services:
       QUECTEL_GATEWAY: ${QUECTEL_GATEWAY:-192.168.225.1}
       QUECTEL_USER: ${QUECTEL_USER:-}
       QUECTEL_PASSWORD: ${QUECTEL_PASSWORD:-}
+      # only seed the VPN settings the first time; then they're on the Settings page
+      VPN_LABEL: ${VPN_LABEL:-VPN}
+      VPN_IFACE: ${VPN_IFACE:-}
+      VPN_BAN_URLS: ${VPN_BAN_URLS:-}
 
   # Internet probes: one per WAN, each on a VLAN the gateway routes out of that WAN only (policy-based route with
   # the kill switch on). They get a DHCP address, listen on nothing, and only write probes/<wan>.json.
@@ -73,6 +77,21 @@ services:
       PROBE_WAN: wan2
       PROBE_HOSTNAME: wan2-probe
 
+  # VPN probe: on a VLAN the gateway routes through a UniFi VPN client only (kill switch on). Same checks, plus the
+  # ban-check sites from the Settings page. Leave this service out if you have no such VLAN.
+  vpn-probe:
+    <<: *probe
+    container_name: vpn-probe
+    hostname: vpn-probe
+    networks:
+      vpn_probe:
+        mac_address: "02:00:00:00:01:03"
+    dns: ${VPN_PROBE_DNS:-1.1.1.1}    # ban-check sites are looked up through the VPN, like any client on that VLAN
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      PROBE_WAN: vpn
+      PROBE_HOSTNAME: vpn-probe
+
 networks:
   lan:
     external: true
@@ -92,3 +111,10 @@ networks:
     ipam:
       config:
         - subnet: 169.254.202.0/30
+  vpn_probe:
+    driver: macvlan
+    driver_opts:
+      parent: ${VPN_PROBE_PARENT:?set VPN_PROBE_PARENT in .env}
+    ipam:
+      config:
+        - subnet: 169.254.203.0/30

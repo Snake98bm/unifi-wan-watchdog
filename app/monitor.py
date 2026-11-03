@@ -28,6 +28,16 @@ Rules
 - The Bounce button only bounces: the PoE power cycle is the automation's backup step, never a
   follow-up to a manual bounce.
 
+VPN (optional, see Vpn below): a probe on a VLAN that the gateway routes through a UniFi OpenVPN client only.
+- No reply VPN_DOWN_MINUTES long, or a ban-check site showing Cloudflare's "banned your IP address" page ->
+  reconnect the OpenVPN client over the restricted SSH key (vpnrestart). The reconnect looks the server name up
+  again, which usually gives a new exit IP.
+- Not while a WAN is being reset, not while the primary WAN is unhealthy, not while every probe fails at once
+  (the VPN rides on the WANs, so those are fixed first).
+- VPN_COOLDOWN_MINUTES between reconnects, at most VPN_MAX_RESTARTS_PER_DAY; dry run applies as for the WANs.
+- Probe traffic leaving through a WAN's own IP means the VPN's kill switch / policy route is broken: logged as an
+  error, no reconnect (a reconnect wouldn't fix that).
+
 Locking: decisions and state changes happen under self.lock; slow I/O (SSH, modem pages, the UniFi power-cycle
 call) runs without it, so the web pages stay responsive. The one-WAN-at-a-time slot (self.busy) is reserved
 under the lock before the I/O starts.
@@ -37,6 +47,7 @@ import os
 import threading
 import time
 from datetime import date
+from urllib.parse import urlparse
 
 from atparse import gateway_log_html, text_html
 from unifi import UniFiError, is_private
@@ -50,6 +61,8 @@ PENDING_MAX_SECONDS = 900         # a reserved slot whose action never finished 
 EXPECTED_NETWORK = {"wan1": "wan", "wan2": "wan2"}   # UniFi's port_table network_name for each WAN
 PROBE_FAILS_OFFLINE = 2           # probe results in a row with no reply at all -> "offline"
 PROBE_STALE_SECONDS = 90          # an older probe result (or 3 probe intervals) is ignored
+VPN_KEY = "vpn"                   # the VPN probe writes probes/vpn.json; events and history use this key
+VPN_SETTLE_SECONDS = 15           # probe results from the first seconds after a reconnect are ignored
 
 
 def mac_vendor(mac):
@@ -141,6 +154,45 @@ class Wan:
         }
 
 
+class Vpn:
+    """The VPN as its probe sees it, plus the reconnect counters."""
+
+    def __init__(self):
+        self.verdict = "off"              # off / none / unknown / ok / fail / banned / leak
+        self.note = ""
+        self.probe = None
+        self.probe_ts = None
+        self.fails = 0                    # no-reply results in a row
+        self.offline_since = None
+        self.last_restart = None          # last real reconnect (also failed ones: the cooldown applies)
+        self.restart_day = None
+        self.restarts_today = 0
+        self.dry = {"last": None, "day": None, "count": 0}
+        self.restarting = False
+        self.recheck = 0.0                # asks the probe to check the ban sites again (after a reconnect)
+        self.action_note = ""
+        self.hold_logged = None
+        self.logged_state = None
+
+    @property
+    def state(self):
+        if self.verdict == "off":
+            return "off"
+        if self.verdict in ("none", "unknown"):
+            return "unknown"
+        if self.verdict in ("banned", "leak"):
+            return self.verdict
+        return "offline" if self.fails >= PROBE_FAILS_OFFLINE else "up"
+
+    def as_dict(self, now):
+        trace = (self.probe or {}).get("trace") or {}
+        return {"state": self.state, "verdict": self.verdict, "note": self.note, "exit_ip": trace.get("exit_ip"),
+                "probe": self.probe, "probe_age": int(now - self.probe["ts"]) if self.probe and self.probe.get("ts")
+                else None, "ban": (self.probe or {}).get("ban"), "offline_for": int(now - self.offline_since)
+                if self.offline_since else None, "last_restart": self.last_restart,
+                "restarts_today": self.restarts_today, "restarting": self.restarting, "action_note": self.action_note}
+
+
 class Monitor(threading.Thread):
     def __init__(self, cfg, client, events, settings, clock=time.time, capture=None, bouncer=None,
                  probe_dir=None, probe_history=None):
@@ -161,6 +213,9 @@ class Monitor(threading.Thread):
         self.bounce_access = {"ok": None, "checked": None, "detail": "not checked yet", "lost": False}
         self.async_captures = True
         self._waiting_logged = None
+        self.vpn = Vpn()
+        self._vpn_conf = None                 # what was last written to probes/vpn.conf.json
+        self._vpn_conf_error = None
         self._stop = threading.Event()
 
     # ---------- loop ----------
@@ -193,6 +248,7 @@ class Monitor(threading.Thread):
         now = self.clock()
         self._watch_firmware(gw.get("version"), now)          # may SSH: done before taking the lock
         probes = {w.key: self._read_probe(w.key) for w in self.wans}
+        vpn_probe = self._read_probe(VPN_KEY)
         with self.lock:
             if self.last_error:
                 self.events.add("info", None, "Gateway API reachable again")
@@ -205,13 +261,18 @@ class Monitor(threading.Thread):
             for w in self.wans:
                 self._update(w, infos[w.key], ports.get(w.port) or {}, now, verdicts.get(w.key))
             self._release_busy(now)
+            self._update_vpn(vpn_probe, infos, now)
             plan = self._decide(now) if self.settings.get("enabled") else None
+            vpn_plan = self._decide_vpn(now)                  # after _decide: a WAN reset holds the VPN back
         if plan:                                              # slow I/O runs without the lock
             w, step, why = plan
             if step == "bounce":
                 self._bounce(w, why, now)
             else:
                 self._cycle(w, why, now, manual=False)
+        if vpn_plan:
+            self._vpn_restart(vpn_plan, now, manual=False)
+        self._sync_vpn_conf()
 
     # ---------- bounce access / firmware survival ----------
     def _watch_firmware(self, version, now):
@@ -344,6 +405,204 @@ class Monitor(threading.Thread):
             self.probe_history.add(probe["ts"], w.key, verdict, sum(p.get("sent", 0) for p in pings),
                                    sum(p.get("recv", 0) for p in pings), (sum(rtts) / len(rtts)) if rtts else None,
                                    (probe.get("trace") or {}).get("exit_ip"))
+
+    # ---------- VPN ----------
+    @property
+    def vpn_label(self):
+        return self.settings.get("vpn_label") or "VPN"
+
+    def _vpn_verdict(self, probe, wan_ips, now):
+        """(verdict, note) for the VPN probe's latest result."""
+        v = self.vpn
+        if not self.probe_dir or not self.settings.get("vpn_check"):
+            return "off", ""
+        if not probe:
+            return "none", "no VPN probe result (vpn-probe container not running?)"
+        ts = float(probe.get("ts") or 0)
+        age = now - ts
+        if age > max(PROBE_STALE_SECONDS, 3 * int(probe.get("interval") or 30)):
+            return "unknown", f"VPN probe result is {int(age // 60)} min old - probe container stopped?"
+        if v.last_restart and ts < v.last_restart + VPN_SETTLE_SECONDS:
+            return "unknown", "waiting for a probe result from after the reconnect"
+        state, detail = probe.get("state"), probe.get("detail") or ""
+        if state == "fail":
+            return "fail", detail
+        if state != "ok":
+            return "unknown", detail or "probe has no result yet"
+        exit_ip = (probe.get("trace") or {}).get("exit_ip")
+        if exit_ip and exit_ip in wan_ips:
+            return "leak", (f"probe traffic left through a WAN ({exit_ip}), not the VPN: check the VPN's policy "
+                            f"route and its kill switch")
+        ban = probe.get("ban") or {}
+        fresh = bool(ban) and float(ban.get("ts") or 0) >= (v.last_restart or 0)
+        if fresh and ban.get("banned"):
+            sites = ", ".join(urlparse(s.get("url", "")).hostname or "?" for s in ban.get("sites") or []
+                              if s.get("banned"))
+            return "banned", f"{sites} banned the exit IP {exit_ip} (Cloudflare)"
+        if ban:
+            detail += "; ban check OK" if fresh else "; ban check pending"
+        return "ok", detail
+
+    def _update_vpn(self, probe, infos, now):
+        """Track the VPN probe (call with the lock held)."""
+        v = self.vpn
+        wan_ips = {ip for ip in (self._wan_ip(i) for i in infos.values()) if ip}
+        verdict, note = self._vpn_verdict(probe, wan_ips, now)
+        v.verdict, v.note = verdict, note
+        v.probe = probe if verdict != "off" else None
+        new = bool(probe) and verdict != "off" and probe.get("ts") != v.probe_ts
+        if verdict != "fail":
+            v.fails = 0
+        elif new:
+            v.fails += 1
+        if new:
+            v.probe_ts = probe.get("ts")
+            if self.probe_history and verdict in ("ok", "fail", "banned"):
+                pings = probe.get("targets") or []
+                rtts = [p["avg_ms"] for p in pings if p.get("avg_ms") is not None]
+                self.probe_history.add(probe["ts"], VPN_KEY, verdict, sum(p.get("sent", 0) for p in pings),
+                                       sum(p.get("recv", 0) for p in pings),
+                                       (sum(rtts) / len(rtts)) if rtts else None,
+                                       (probe.get("trace") or {}).get("exit_ip"))
+        v.offline_since = (v.offline_since or now) if v.state == "offline" else None
+        state = v.state
+        if state == v.logged_state or state == "off" or (state == "unknown" and "after the reconnect" in note):
+            return
+        exit_ip = ((probe or {}).get("trace") or {}).get("exit_ip")
+        label = self.vpn_label
+        level, text = {"up": ("info", f"{label} is up (exit IP {exit_ip})"),
+                       "offline": ("warn", f"{label} has NO INTERNET (VPN probe: {note})"),
+                       "banned": ("warn", f"{label}'s exit IP is BANNED: {note}"),
+                       "leak": ("error", f"{label}'s probe is NOT going through the VPN: {note}"),
+                       "unknown": ("warn", f"{label}: {note}")}[state]
+        self.events.add(level, VPN_KEY, text + (f" (was {v.logged_state})" if v.logged_state else ""))
+        v.logged_state = state
+
+    def _roll_vpn_day(self):
+        v, today = self.vpn, date.today().isoformat()
+        if v.restart_day != today:
+            v.restart_day, v.restarts_today = today, 0
+        if v.dry["day"] != today:
+            v.dry["day"], v.dry["count"] = today, 0
+
+    def _vpn_hold(self, now):
+        """(key, why) when the VPN may not be reconnected automatically right now, else None."""
+        v = self.vpn
+        if not self.settings.get("vpn_iface"):
+            return "iface", "no VPN tunnel interface is set on the Settings page"
+        if not (self.bouncer and self.bounce_access["ok"]):
+            return "access", "gateway access (install-bounce.sh) isn't working"
+        if self.busy:
+            return "busy", f"{self._wan(self.busy['wan']).label} is being reset first"
+        for w in self.wans:
+            if w.is_uplink and not w.healthy:
+                return "wan", f"the primary WAN {w.label} is {w.state} (fixed first)"
+        if v.state == "offline" and self._all_probes_failing:
+            return "probes", "every internet probe is failing at once"
+        self._roll_vpn_day()
+        dry = self.settings.get("dry_run")
+        last, count = (v.dry["last"], v.dry["count"]) if dry else (v.last_restart, v.restarts_today)
+        cooldown = int(self.settings.get("vpn_cooldown_minutes") or 5) * 60
+        if last and now - last < cooldown:
+            return "cooldown", f"waiting {int((cooldown - (now - last)) // 60) + 1} min (cooldown)"
+        cap = int(self.settings.get("vpn_max_restarts_per_day") or 0)
+        if count >= cap:
+            return "limit", f"daily limit reached ({count} of {cap})"
+        return None
+
+    def _decide_vpn(self, now):
+        """The reason to reconnect the VPN now (and marks it as running), else None. Call with the lock held."""
+        v = self.vpn
+        reason = None
+        if v.state == "banned":
+            reason = v.note
+        elif v.state == "offline" and v.offline_since and \
+                now - v.offline_since >= int(self.settings.get("vpn_down_minutes") or 2) * 60:
+            reason = f"no internet through it for {int((now - v.offline_since) // 60)} min"
+        if not reason or v.restarting or not self.settings.get("enabled"):
+            v.action_note = "" if not v.restarting else v.action_note
+            v.hold_logged = None
+            return None
+        hold = self._vpn_hold(now)
+        if hold:
+            key, why = hold
+            v.action_note = f"needs a reconnect ({reason}) but {why}"
+            if v.hold_logged != key:
+                self.events.add("info", VPN_KEY, f"{self.vpn_label} needs a reconnect ({reason}) but {why}")
+                v.hold_logged = key
+            return None
+        v.restarting, v.hold_logged = True, None
+        v.action_note = "reconnecting"
+        return reason
+
+    def _vpn_restart(self, reason, now, manual):
+        """Reconnect the VPN (already marked as running). Called WITHOUT the lock: it takes up to ~60 s."""
+        v, label, tun = self.vpn, self.vpn_label, self.settings.get("vpn_iface")
+        who = "Manual" if manual else "Automatic"
+        dry = self.settings.get("dry_run") and not manual    # dry run only covers automatic actions
+        if dry:
+            self.events.add("action", VPN_KEY, f"DRY RUN: would reconnect {label} ({tun}) - {reason}")
+            code, out = 0, None
+        else:
+            code, out = self.bouncer.vpn_restart(tun)
+            if code == 255:              # ssh itself failed: re-check once to tell a blip from lost access
+                still_ok, detail = self.bouncer.check()
+                if not still_ok:
+                    with self.lock:
+                        self.bounce_access = {"ok": False, "checked": self.clock(), "detail": detail, "lost": True}
+        done = self.clock()
+        with self.lock:
+            v.restarting, v.action_note = False, ""
+            self._roll_vpn_day()
+            if dry:
+                v.dry["last"], v.dry["count"] = now, v.dry["count"] + 1
+                return True, "dry run logged"
+            v.last_restart = done        # also after a failure: the cooldown applies
+            if code != 0:
+                what = {2: "was refused by the gateway (is it in VPN_IFACES of install-bounce.sh?)",
+                        3: "ran but the tunnel did NOT come back within 60 s",
+                        5: "found no running OpenVPN client for it", 255: "couldn't run"}.get(code, f"failed (exit {code})")
+                self.events.add("error", VPN_KEY, f"{who} reconnect of {label} ({tun}) {what}: {out}")
+                return False, f"Reconnect {what}: {out}"
+            v.restarts_today += 1
+            v.fails, v.offline_since = 0, None
+            v.recheck = done             # the probe checks the ban sites again with the new exit IP
+            self.events.add("action", VPN_KEY, f"{who} reconnect of {label}: {out} - {reason}")
+            return True, f"Reconnected: {out}"
+
+    def manual_vpn_restart(self):
+        with self.lock:
+            v = self.vpn
+            if v.restarting:
+                return False, "a reconnect is already running"
+            if not self.settings.get("vpn_iface"):
+                return False, "set the VPN tunnel interface on the Settings page first"
+            if not (self.bouncer and self.bounce_access["ok"]):
+                return False, "gateway access isn't working - see the Port bounce card"
+            v.restarting = True
+            now = self.clock()
+        return self._vpn_restart("requested from the web page", now, manual=True)
+
+    def _sync_vpn_conf(self):
+        """Tell the VPN probe which sites to ban-check (probes/vpn.conf.json); written only when it changes."""
+        if not self.probe_dir or not os.path.isdir(self.probe_dir):
+            return
+        urls = [u.strip() for u in str(self.settings.get("vpn_ban_urls") or "").split("\n") if u.strip()][:4]
+        want = {"ban_urls": urls if self.settings.get("vpn_check") else [],
+                "ban_every": int(self.settings.get("vpn_ban_minutes") or 60) * 60, "recheck": self.vpn.recheck}
+        if want == self._vpn_conf:
+            return
+        path = os.path.join(self.probe_dir, f"{VPN_KEY}.conf.json")
+        try:
+            with open(path + ".tmp", "w") as f:
+                json.dump(want, f)
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            if str(e) != self._vpn_conf_error:
+                self.events.add("error", VPN_KEY, f"Can't write {path} for the VPN probe: {e}")
+                self._vpn_conf_error = str(e)
+            return
+        self._vpn_conf, self._vpn_conf_error = want, None
 
     # ---------- WAN state ----------
     def _update(self, w, info, port, now, probe=None):
@@ -730,4 +989,6 @@ class Monitor(threading.Thread):
                     "last_check": self.last_check, "last_error": self.last_error, "now": now,
                     "settings": dict(self.settings.data), "cfg": self.cfg, "gw_version": self.gw_version,
                     "bounce": dict(self.bounce_access, configured=bool(self.bouncer and self.bouncer.configured())),
+                    "vpn": dict(self.vpn.as_dict(now), label=self.vpn_label, iface=self.settings.get("vpn_iface"),
+                                watched=bool(self.probe_dir and self.settings.get("vpn_check"))),
                     "capture_keys": [w.key for w in self.wans if self.capture and self.capture.has(w.key)]}

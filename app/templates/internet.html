@@ -25,6 +25,15 @@
         <td class="num">{{ t.avg_ms if t.avg_ms is not none else "-" }}</td>
         <td class="num">{{ t.worst_ms if t.worst_ms is not none else "-" }}</td></tr>
     {% endfor %}
+    {% if "vpn" in totals %}{% set t = totals["vpn"] %}{% set v = s.vpn %}
+    <tr><td>{{ v.label }} <span class="muted">VPN</span></td>
+        <td>{% if v.verdict == "ok" %}<span class="good">OK</span>{% elif v.verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif v.verdict == "banned" %}<span class="bad">BANNED</span>{% else %}{{ v.verdict }}{% endif %}
+            <span class="muted">{{ v.note }}</span></td>
+        <td class="num">{{ t.checks }}</td><td class="num {{ 'bad' if t.failed }}">{{ t.failed }}</td>
+        <td class="num">{{ "%.2f%%"|format(t.loss) if t.loss is not none else "-" }}</td>
+        <td class="num">{{ t.avg_ms if t.avg_ms is not none else "-" }}</td>
+        <td class="num">{{ t.worst_ms if t.worst_ms is not none else "-" }}</td></tr>
+    {% endif %}
   </table></div>
 </div>
 <div class="cards">
