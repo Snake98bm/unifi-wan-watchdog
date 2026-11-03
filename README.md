@@ -64,3 +64,7 @@ docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint python local/wan-watchdog
 - A PoE power cycle only restarts a modem that is powered from that gateway port (PoE or a PoE splitter).
 - UDM SE switch ports don't support `ethtool -r`, so the bounce is a 5 s link down/up.
 - Use at your own risk: it power-cycles network equipment.
+
+## License
+
+[MIT](LICENSE)
