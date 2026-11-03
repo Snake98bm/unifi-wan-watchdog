@@ -31,6 +31,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 .pill.up { background: var(--up); } .pill.down { background: var(--down); }
 .pill.private { background: var(--warn); } .pill.unknown { background: var(--muted); }
 .pill.offline { background: var(--down); }
+#last-check { font-size: 13px; margin-right: auto; } #last-check.stale { color: var(--down); font-weight: 600; }
 .wan-name { font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
 .good { color: var(--up); } .bad { color: var(--down); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -57,10 +58,11 @@ form.inline { display: inline; }
 label { margin-right: 14px; }
 </style>
 </head>
-<body>
+<body{% if auto_refresh is defined %} data-refresh="{{ auto_refresh }}"{% endif %}>
 {% if session.auth %}
 <header>
   <h1>WAN Watchdog <span class="muted" style="font-size: 13px; font-weight: normal;">v{{ version }}</span></h1>
+  {% if s is defined and s %}<span id="last-check" class="muted" data-ts="{{ s.last_check or '' }}" data-interval="{{ s.cfg.check_interval }}">Last check {{ s.last_check|when }}</span>{% endif %}
   <nav>
     <a href="{{ url_for('dashboard') }}">Status</a>
     <a href="{{ url_for('log') }}">Log</a>
@@ -76,5 +78,42 @@ label { margin-right: 14px; }
 {% for cat, msg in get_flashed_messages(with_categories=true) %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
 {% block body %}{% endblock %}
 </main>
+<script>
+// "Last check" ticks every second; pages with data-refresh reload their content in place (no page reload),
+// but never while a pop-up is open, a field has focus, or the tab is hidden
+(function () {
+  var el = document.getElementById("last-check");
+  function ago(s) { s = Math.max(0, Math.round(s)); return s < 60 ? s + " s ago" : Math.floor(s / 60) + " min " + (s % 60) + " s ago"; }
+  function tick() {
+    if (!el) return;
+    var ts = parseFloat(el.dataset.ts || "0"), every = parseFloat(el.dataset.interval || "30");
+    if (!ts) { el.textContent = "Last check: not yet"; return; }
+    var age = Date.now() / 1000 - ts;
+    el.textContent = "Last check " + new Date(ts * 1000).toLocaleTimeString() + " (" + ago(age) + ")";
+    el.className = age > 3 * every + 15 ? "stale" : "muted";
+  }
+  tick(); setInterval(tick, 1000);
+  var secs = parseInt(document.body.dataset.refresh || "0", 10);
+  if (!secs) return;
+  function busy() {
+    var a = document.activeElement;
+    return document.hidden || document.querySelector("dialog[open]") || (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
+  }
+  function refresh() {
+    if (busy()) return;
+    fetch(location.href, {credentials: "same-origin"}).then(function (r) {
+      if (r.redirected) { location.reload(); throw 0; }   // logged out
+      if (!r.ok) throw 0;
+      return r.text();
+    }).then(function (html) {
+      if (busy()) return;
+      var doc = new DOMParser().parseFromString(html, "text/html"), main = doc.querySelector("main"), lc = doc.getElementById("last-check");
+      if (main) document.querySelector("main").innerHTML = main.innerHTML;
+      if (lc && el) { el.dataset.ts = lc.dataset.ts; tick(); }
+    }).catch(function () {});
+  }
+  setInterval(refresh, secs * 1000);
+})();
+</script>
 </body>
 </html>

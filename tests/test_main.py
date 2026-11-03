@@ -32,6 +32,11 @@ class WebTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, url)
         body = self.c.get("/internet").get_data(as_text=True)
         self.assertIn("58.33%", body)                     # 7 of 12 pings lost over the period
+        self.assertIn('data-refresh="30"', body)
+        home = self.c.get("/").get_data(as_text=True)
+        self.assertIn('data-refresh="10"', home)
+        self.assertIn('id="last-check"', home)
+        self.assertIn("<body>", self.c.get("/settings/all").get_data(as_text=True))   # forms: no auto refresh
 
     def test_login_redirect_stays_on_site(self):
         r = self.login("/%5Cevil.example")
