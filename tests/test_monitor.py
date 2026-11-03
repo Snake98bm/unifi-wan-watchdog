@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 
@@ -449,6 +450,68 @@ class MonitorTests(unittest.TestCase):
         ok, msg = self.mon.manual_bounce("wan2")
         self.assertTrue(ok)
         self.assertEqual(msg, "Bounce verified: eth0 back UP at 1000 Mb/s after 6s (link down 5 s)")
+
+    # ---------- review fixes ----------
+    def test_lock_is_free_while_bounce_runs(self):
+        self.with_bouncer()
+        mon, seen = self.mon, {}
+
+        def slow_bounce(ifname):
+            t = threading.Thread(target=lambda: seen.update(snap=mon.snapshot()))
+            t.start()
+            t.join(2)                                       # would hang if the lock were held
+            seen["other"] = mon.manual_cycle("wan1")        # slot is reserved: refused
+            return 0, f"{ifname} back UP"
+
+        self.bouncer.bounce = slow_bounce
+        ok, _ = mon.manual_bounce("wan2")
+        self.assertTrue(ok)
+        self.assertIn("snap", seen)
+        self.assertTrue(seen["snap"]["busy"]["pending"])
+        self.assertFalse(seen["other"][0])
+        self.assertIn("one WAN at a time", seen["other"][1])
+
+    def test_transient_ssh_failure_keeps_bounce_access(self):
+        self.with_bouncer()
+        self.bouncer.bounce = lambda ifname: (255, "ssh: connect to host timed out")   # check() still works
+        self.mon.manual_bounce("wan2")
+        self.assertTrue(self.mon.bounce_access["ok"])
+
+    def test_lost_bounce_access_is_retried_until_it_works(self):
+        self.with_bouncer()
+        self.bouncer.works = False
+        self.mon.manual_bounce("wan2")                      # 255 and check() fails too -> lost
+        self.assertEqual((self.mon.bounce_access["ok"], self.mon.bounce_access["lost"]), (False, True))
+        self.bouncer.works = True
+        self.clock.run(self.mon, 29)
+        self.assertFalse(self.mon.bounce_access["ok"])       # not hammered every 30 s
+        self.clock.run(self.mon, 2)
+        self.assertTrue(self.mon.bounce_access["ok"])        # re-checked after 30 min and back
+
+    def test_never_installed_bounce_is_not_retried(self):
+        self.with_bouncer(works=False)
+        checks = self.bouncer.checks
+        self.clock.run(self.mon, 120)
+        self.assertEqual(self.bouncer.checks, checks)
+
+    def test_dry_run_cycles_dont_use_up_real_limit(self):
+        self.settings.set(dry_run=True)
+        self.gw.wan["wan2"] = {"up": False, "ip": None}
+        self.clock.run(self.mon, 60 * 6)                     # 6 h of simulated cycles
+        self.assertEqual(self.mon._wan("wan2").cycles_today, 0)
+        self.settings.set(dry_run=False)
+        self.clock.run(self.mon, 6)
+        self.assertEqual(self.gw.cycles, [1])                 # real cycle not blocked by the dry ones
+
+    def test_failed_power_cycle_frees_the_slot(self):
+        from unifi import UniFiError
+
+        def boom(mac, port):
+            raise UniFiError("timeout")
+        self.gw.power_cycle = boom
+        ok, _ = self.mon.manual_cycle("wan2")
+        self.assertFalse(ok)
+        self.assertIsNone(self.mon.busy)
 
     def test_automation_off_only_watches(self):
         self.settings.set(enabled=False)

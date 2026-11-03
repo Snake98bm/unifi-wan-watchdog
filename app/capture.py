@@ -129,24 +129,25 @@ class Capturer:
                     body = at_html(item["at"], text)
                 elif "<" not in body:              # plain text / JSON endpoint: show it as a table
                     body = text_html(page, body)
-                base = os.path.join(folder, f"{i:02d}-{page}")
-                with open(base + ".html", "w", encoding="utf-8", errors="replace") as f:
-                    f.write(body)
-                with open(base + ".txt", "w", encoding="utf-8") as f:
-                    f.write(f"{item['at'] or url}\n\n{html_to_text(body)}\n")
+                self._write(folder, i, page, body, item["at"] or url)
                 saved += 1
         for j, (page, body) in enumerate(extra or [], len(urls) + 1):
-            base = os.path.join(folder, f"{j:02d}-{page}")
-            with open(base + ".html", "w", encoding="utf-8", errors="replace") as f:
-                f.write(body)
-            with open(base + ".txt", "w", encoding="utf-8") as f:
-                f.write(f"{page}\n\n{html_to_text(body)}\n")
+            self._write(folder, j, page, body, page)
             saved += 1
         if not saved:
             shutil.rmtree(folder, ignore_errors=True)
             name = None
         self._prune()
         return name, saved, errors
+
+    @staticmethod
+    def _write(folder, index, page, body, source):
+        """One saved page: NN-<page>.html (for the views) and NN-<page>.txt (plain text, first line = source)."""
+        base = os.path.join(folder, f"{index:02d}-{page}")
+        with open(base + ".html", "w", encoding="utf-8", errors="replace") as f:
+            f.write(body)
+        with open(base + ".txt", "w", encoding="utf-8") as f:
+            f.write(f"{source}\n\n{html_to_text(body)}\n")
 
     def _prune(self):
         cutoff = time.strftime("%Y%m%d", time.localtime(time.time() - self.keep_days * 86400))

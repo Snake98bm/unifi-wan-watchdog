@@ -17,7 +17,8 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
 {% if s.last_error %}<div class="banner err">{{ s.last_error }}</div>{% endif %}
 {% if s.settings.dry_run %}<div class="banner">Dry run is ON: the watchdog only logs what it would do on its own. The Bounce and Power-cycle buttons below still really act.</div>{% endif %}
 {% if not s.settings.enabled %}<div class="banner">Automation is OFF: the watchdog only watches and logs.</div>{% endif %}
-{% if s.busy %}<div class="banner">{{ s.busy.label }} was {{ "bounced" if s.busy.what == "bounce" else "power-cycled" }} {{ (s.now - s.busy.since)|dur }} ago. Other WANs wait up to {{ s.busy.left|dur }} (one at a time).</div>{% endif %}
+{% if s.busy and s.busy.pending %}<div class="banner">{{ s.busy.label }}: {{ s.busy.what }} in progress ({{ (s.now - s.busy.since)|dur }}). Other WANs wait (one at a time).</div>
+{% elif s.busy %}<div class="banner">{{ s.busy.label }} was {{ "bounced" if s.busy.what == "bounce" else "power-cycled" }} {{ (s.now - s.busy.since)|dur }} ago. Other WANs wait up to {{ s.busy.left|dur }} (one at a time).</div>{% endif %}
 
 <div class="cards">
 {% for w in s.wans %}
@@ -80,10 +81,17 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
       <dt>Result</dt><dd>{{ s.bounce.detail }}</dd>
     </dl>
     {% if s.bounce.configured and not s.bounce.ok %}<p class="note">Run gateway/install-bounce.sh on the Dream Machine to (re)enable it. Until then problems go straight to the PoE power cycle.</p>{% endif %}
-    <form method="post" action="{{ url_for('bounce_check') }}">
+    <form method="post" action="{{ url_for('bounce_check') }}" style="display: inline;">
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       <button>Check now</button>
     </form>
+    {% if "host key changed" in (s.bounce.detail or "") %}
+    <form method="post" action="{{ url_for('bounce_forget_host_key') }}" style="display: inline;"
+          onsubmit="return confirm('Forget the stored gateway SSH host key and trust the gateway\'s current key?');">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="danger">Forget gateway host key</button>
+    </form>
+    {% endif %}
   </div>
   <div class="card">
     <h2>Settings</h2>

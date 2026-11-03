@@ -27,7 +27,9 @@ def is_private(ip):
 
 
 class UniFiError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status       # HTTP status if the gateway answered, None for timeouts / connection errors
 
 
 class UniFi:
@@ -47,7 +49,7 @@ class UniFi:
         except requests.RequestException as e:
             raise UniFiError(f"{method} {path}: {e.__class__.__name__}: {e}") from e
         if r.status_code >= 400:
-            raise UniFiError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:200]}")
+            raise UniFiError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:200]}", status=r.status_code)
         try:
             return r.json() if r.content else {}
         except ValueError as e:
@@ -98,15 +100,26 @@ class UniFi:
         return self._device_ids[mac]
 
     def power_cycle(self, mac, port_idx):
-        """PoE power-cycle one gateway port. Returns which API did it."""
+        """PoE power-cycle one gateway port. Returns which API did it.
+
+        Falls back to the classic API only when the Integration API certainly did NOT act: its site/device
+        lookup failed, or it rejected the request (4xx / 501). A timeout or 5xx may mean the port was already
+        cycled, so it is reported instead of cycling a second time."""
         errors = []
         try:
             path = (f"/proxy/network/integration/v1/sites/{self.site_id()}/devices/"
                     f"{self.device_id(mac)}/interfaces/ports/{port_idx}/actions")
-            self._request("POST", path, json={"action": "POWER_CYCLE"})
-            return "Integration API"
         except UniFiError as e:
-            errors.append(f"Integration API: {e}")
+            errors.append(f"Integration API lookup: {e}")
+        else:
+            try:
+                self._request("POST", path, json={"action": "POWER_CYCLE"})
+                return "Integration API"
+            except UniFiError as e:
+                if e.status is None or (e.status >= 500 and e.status != 501):
+                    raise UniFiError(f"Integration API: {e} - the power cycle may have happened, so it was not "
+                                     f"sent again") from e
+                errors.append(f"Integration API: {e}")
         try:
             self._request("POST", f"/proxy/network/api/s/{self.site}/cmd/devmgr",
                           json={"cmd": "power-cycle", "mac": mac, "port_idx": int(port_idx)})

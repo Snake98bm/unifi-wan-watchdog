@@ -57,7 +57,7 @@ why the line went down.
 ```sh
 docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint python local/wan-watchdog:1 /tests/test_monitor.py
 ```
-(also `test_config`, `test_capture`, `test_pages`, `test_atparse`).
+(also `test_config`, `test_capture`, `test_pages`, `test_atparse`, `test_unifi`, `test_bounce`, `test_main`).
 
 ## Notes
 

@@ -25,8 +25,16 @@ TAG=$(echo "$KEY" | awk '{print $3}')
 IFACES="${WAN_IFACES:-eth8 eth9}"
 for i in $IFACES; do case "$i" in eth[0-9]|eth[0-9][0-9]) ;; *) echo "WAN_IFACES: bad interface '$i'"; exit 1 ;; esac; done
 
+# every authorized_keys line except the watchdog's (its key comment is the last field; exact match, no regex,
+# and awk succeeds even when nothing is left)
+others() { awk -v t="$TAG" '$NF != t' "$AK"; }
+
 if [ "$1" = "remove" ]; then
-  [ -f $AK ] && grep -v " $TAG\$" $AK > $AK.tmp && cat $AK.tmp > $AK && rm -f $AK.tmp
+  if [ -f "$AK" ]; then
+    others > "$AK.tmp"
+    cat "$AK.tmp" > "$AK"
+    rm -f "$AK.tmp"
+  fi
   rm -rf $D
   echo "Removed: watchdog key and $D"
   exit 0
@@ -105,7 +113,7 @@ echo "$LINE" > $D/authorized_key.line
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch $AK && chmod 600 $AK
 [ -f $AK.bak-wan-watchdog ] || cp -p $AK $AK.bak-wan-watchdog
-grep -v " $TAG\$" $AK > $AK.tmp || true
+others > "$AK.tmp"
 echo "$LINE" >> $AK.tmp
 cat $AK.tmp > $AK && rm -f $AK.tmp
 echo "Installed $D/wan-bounce.sh for: $IFACES"

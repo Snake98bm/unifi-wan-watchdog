@@ -10,13 +10,19 @@ Rules
 - Only ONE WAN is ever being reset: after a bounce or cycle, nothing else is touched until that WAN
   is healthy again (at least 2 minutes later) or its wait window has passed.
 - If both need a reset, the WAN listed first in WANS (AT&T) goes first.
-- Per WAN: COOLDOWN_MINUTES between PoE cycles and at most MAX_CYCLES_PER_DAY.
+- Per WAN: COOLDOWN_MINUTES between PoE cycles and at most MAX_CYCLES_PER_DAY (dry-run cycles are counted
+  separately, so they never use up the real limit).
 - Bounce access is checked at startup and whenever the gateway firmware changes, so a firmware update
-  that drops the key is noticed and logged. A failed bounce also marks the access as not working.
+  that drops the key is noticed and logged. If it stops working while running, it is re-checked every
+  BOUNCE_RETRY_SECONDS until it works again.
 - Dry run logs what it WOULD do on its own without touching the port. The Bounce / Power-cycle
   buttons on the web page always really act (they still follow the one-WAN-at-a-time rule).
 - The Bounce button only bounces: the PoE power cycle is the automation's backup step, never a
   follow-up to a manual bounce.
+
+Locking: decisions and state changes happen under self.lock; slow I/O (SSH, modem pages, the UniFi power-cycle
+call) runs without it, so the web pages stay responsive. The one-WAN-at-a-time slot (self.busy) is reserved
+under the lock before the I/O starts.
 """
 import threading
 import time
@@ -29,6 +35,8 @@ from version import VERSION
 MIN_RECOVERY_SECONDS = 120
 EVENT_CAPTURE_CHECKS = 2          # bad for this many checks in a row (~30 s) -> save the modem's state now
 EVENT_CAPTURE_EVERY = 3600        # ... but at most once an hour per WAN (AT&T's latency flapping)
+BOUNCE_RETRY_SECONDS = 1800       # bounce access lost while running -> re-check this often until it works
+PENDING_MAX_SECONDS = 900         # a reserved slot whose action never finished is freed after this
 EXPECTED_NETWORK = {"wan1": "wan", "wan2": "wan2"}   # UniFi's port_table network_name for each WAN
 
 
@@ -56,6 +64,7 @@ class Wan:
         self.last_bounce = None
         self.cycle_day = None
         self.cycles_today = 0
+        self.dry = {"last_cycle": None, "day": None, "cycles": 0}   # dry-run cycles, kept apart from real ones
         self.note = ""
         # what UniFi says about the WAN and its port, for the safety checks
         self.is_uplink = False
@@ -111,12 +120,12 @@ class Monitor(threading.Thread):
         self.bouncer = bouncer    # optional: link bounce over the restricted SSH key
         self.wans = [Wan(k, label, port, i) for i, (k, label, port) in enumerate(cfg["wans"])]
         self.lock = threading.RLock()
-        self.busy = None          # {"wan", "since", "until", "what"} while a reset recovers
+        self.busy = None          # {"wan", "since", "until", "what", "pending"} while a reset runs / recovers
         self.gw_mac = None
         self.gw_version = None
         self.last_check = None
         self.last_error = None
-        self.bounce_access = {"ok": None, "checked": None, "detail": "not checked yet"}
+        self.bounce_access = {"ok": None, "checked": None, "detail": "not checked yet", "lost": False}
         self.async_captures = True
         self._waiting_logged = None
         self._stop = threading.Event()
@@ -149,19 +158,24 @@ class Monitor(threading.Thread):
             self._error(f"Can't read the gateway: {e} (no action taken)")
             return
         now = self.clock()
+        self._watch_firmware(gw.get("version"), now)          # may SSH: done before taking the lock
         with self.lock:
             if self.last_error:
                 self.events.add("info", None, "Gateway API reachable again")
             self.last_error = None
             self.last_check = now
             self.gw_mac = gw.get("mac")
-            self._watch_firmware(gw.get("version"), now)
             ports = {p.get("port_idx"): p for p in gw.get("port_table", [])}
             for w in self.wans:
                 self._update(w, gw.get(w.key) or {}, ports.get(w.port) or {}, now)
             self._release_busy(now)
-            if self.settings.get("enabled"):
-                self._decide(now)
+            plan = self._decide(now) if self.settings.get("enabled") else None
+        if plan:                                              # slow I/O runs without the lock
+            w, step, why = plan
+            if step == "bounce":
+                self._bounce(w, why, now)
+            else:
+                self._cycle(w, why, now, manual=False)
 
     # ---------- bounce access / firmware survival ----------
     def _watch_firmware(self, version, now):
@@ -170,17 +184,23 @@ class Monitor(threading.Thread):
         if version and version != known:
             self.settings.set(gw_firmware=version)
         self.gw_version = version
-        startup = self.bounce_access["checked"] is None
-        if self.bouncer and self.bouncer.configured() and (startup or changed):
+        access = self.bounce_access
+        startup = access["checked"] is None
+        retry = access["lost"] and now - (access["checked"] or 0) >= BOUNCE_RETRY_SECONDS
+        if self.bouncer and self.bouncer.configured() and (startup or changed or retry):
             self.check_bounce_access(now, firmware_change=(known, version) if changed else None)
         elif changed:
             self.events.add("info", None, f"Gateway firmware changed {known} -> {version}")
 
     def check_bounce_access(self, now=None, firmware_change=None):
+        """SSH check of the restricted key (no lock held during the SSH call)."""
         now = now or self.clock()
         was_ok = self.bounce_access["ok"]
         ok, detail = self.bouncer.check()
-        self.bounce_access = {"ok": ok, "checked": now, "detail": detail}
+        with self.lock:
+            # "lost" = it worked earlier in this run, so keep retrying; never-installed isn't retried
+            lost = not ok and (was_ok is True or self.bounce_access["lost"])
+            self.bounce_access = {"ok": ok, "checked": now, "detail": detail, "lost": lost}
         if firmware_change:
             old, new = firmware_change
             if ok:
@@ -292,6 +312,11 @@ class Monitor(threading.Thread):
             return
         w = self._wan(self.busy["wan"])
         elapsed = now - self.busy["since"]
+        if self.busy.get("pending"):          # the action is still running in another thread
+            if elapsed >= PENDING_MAX_SECONDS:
+                self.events.add("warn", w.key, f"{w.label}'s {self.busy['what']} never finished; freeing the slot")
+                self.busy = None
+            return
         if w.healthy and elapsed >= MIN_RECOVERY_SECONDS:
             self.events.add("info", w.key, f"{w.label} recovered {int(elapsed // 60)} min after the {self.busy['what']}")
             self.busy = None
@@ -313,14 +338,21 @@ class Monitor(threading.Thread):
     def _can_bounce(self, w):
         return bool(self.bouncer and self.bounce_access["ok"] and w.ifname and w.bounced_at is None)
 
+    def _counters(self, w):
+        """(last cycle, cycles today) for the current mode: dry-run cycles never count against real ones."""
+        self._roll_day(w)
+        if self.settings.get("dry_run"):
+            return w.dry["last_cycle"], w.dry["cycles"]
+        return w.last_cycle, w.cycles_today
+
     def _blocked(self, w, now):
         """Why this WAN may not be PoE-cycled right now (cooldown / daily cap), else None."""
-        self._roll_day(w)
-        if w.last_cycle and now - w.last_cycle < self.cfg["cooldown_minutes"] * 60:
-            left = int((self.cfg["cooldown_minutes"] * 60 - (now - w.last_cycle)) // 60) + 1
+        last, count = self._counters(w)
+        if last and now - last < self.cfg["cooldown_minutes"] * 60:
+            left = int((self.cfg["cooldown_minutes"] * 60 - (now - last)) // 60) + 1
             return f"cooldown ({left} min left)"
-        if w.cycles_today >= self.cfg["max_cycles_per_day"]:
-            return f"daily limit reached ({w.cycles_today})"
+        if count >= self.cfg["max_cycles_per_day"]:
+            return f"daily limit reached ({count})"
         return None
 
     def _next_step(self, w, now):
@@ -337,7 +369,13 @@ class Monitor(threading.Thread):
             return None, f"needs a power cycle: {reason}; {blocked}"
         return "cycle", reason + (" (port bounce didn't help)" if w.bounced_at else "")
 
+    def _reserve(self, w, what, now):
+        """Take the one-WAN-at-a-time slot before slow I/O starts (call with the lock held)."""
+        self.busy = {"wan": w.key, "since": now, "what": what, "until": now + PENDING_MAX_SECONDS, "pending": True}
+        self._waiting_logged = None
+
     def _decide(self, now):
+        """Pick the one action to run now and reserve the slot for it. Returns (wan, step, reason) or None."""
         due = []
         for w in self.wans:  # self.wans is already in priority order (AT&T first)
             step, why = self._next_step(w, now)
@@ -352,7 +390,7 @@ class Monitor(threading.Thread):
                 due.append((w, step, why))
         if not due:
             self._waiting_logged = None
-            return
+            return None
         if self.busy:
             busy = self._wan(self.busy["wan"])
             key = tuple(w.key for w, _, _ in due)
@@ -360,12 +398,12 @@ class Monitor(threading.Thread):
                 names = ", ".join(w.label for w, _, _ in due)
                 self.events.add("info", None, f"{names} waiting: only one WAN at a time and {busy.label} is still recovering")
                 self._waiting_logged = key
-            return
+            return None
         w, step, why = due[0]
+        self._reserve(w, "bounce" if step == "bounce" else "power cycle", now)
         if step == "bounce":
-            self._bounce(w, why, now)
-        else:
-            self._cycle(w, why, now, manual=False)
+            w.bounced_at = now                    # don't pick the bounce again while it runs
+        return w, step, why
 
     # ---------- actions ----------
     def _gateway_log(self, w):
@@ -405,60 +443,75 @@ class Monitor(threading.Thread):
         w.capturing.start()
 
     def _bounce(self, w, reason, now, manual=False):
-        """A manual bounce only bounces: it never counts as the automatic bounce step (so it can't lead to
+        """Run a bounce whose slot is already reserved. Called WITHOUT the lock (the SSH call can take ~46 s).
+
+        A manual bounce only bounces: it never counts as the automatic bounce step (so it can't lead to
         a PoE cycle) and it restarts the automatic timers, giving the WAN a fresh chance."""
         who = "Manual" if manual else "Automatic"
         dry = self.settings.get("dry_run") and not manual    # dry run only covers automatic actions
-        if manual:
-            w.down_since = w.private_since = None
-        else:
-            w.bounced_at = now
+        with self.lock:
+            if manual:
+                w.down_since = w.private_since = None
         if dry:
             self.events.add("action", w.key, f"DRY RUN: would bounce {w.label}'s gateway port ({w.ifname}) - {reason}")
+            code, out = 0, None
         else:
             code, out = self.bouncer.bounce(w.ifname)
+            if code == 255:              # ssh itself failed: re-check once to tell a blip from lost access
+                still_ok, detail = self.bouncer.check()
+                if not still_ok:
+                    with self.lock:
+                        self.bounce_access = {"ok": False, "checked": self.clock(), "detail": detail, "lost": True}
+        done = self.clock()
+        with self.lock:
             if code != 0:
-                if code == 255:          # ssh itself failed: key refused or gateway unreachable
-                    self.bounce_access = {"ok": False, "checked": now, "detail": out}
-                    what = "couldn't run"
-                else:
-                    what = {2: "was refused by the gateway", 3: "ran but the link did NOT come back up",
-                            4: "ran but the link never dropped"}.get(code, f"failed (exit {code})")
+                what = {2: "was refused by the gateway", 3: "ran but the link did NOT come back up",
+                        4: "ran but the link never dropped", 255: "couldn't run"}.get(code, f"failed (exit {code})")
                 self.events.add("error", w.key, f"{who} port bounce of {w.label} ({w.ifname}) {what}: {out}"
                                                 + ("" if manual else "; going to the PoE power cycle instead"))
                 if not manual:
                     w.bounced_at = now - self.cfg["bounce_wait_minutes"] * 60   # skip the wait
+                self.busy = None
                 return False, f"Bounce {what}: {out}"
-            self.events.add("action", w.key, f"{who} port bounce of {w.label} - verified on the gateway: {out} - {reason}")
-        w.last_bounce = now
-        self.busy = {"wan": w.key, "since": now, "what": "bounce",
-                     "until": now + self.cfg["bounce_wait_minutes"] * 60}
-        self._waiting_logged = None
-        return True, "dry run logged" if dry else f"Bounce verified: {out}"
+            if not dry:
+                self.events.add("action", w.key, f"{who} port bounce of {w.label} - verified on the gateway: {out} - {reason}")
+            w.last_bounce = now
+            self.busy = {"wan": w.key, "since": done, "what": "bounce",
+                         "until": done + self.cfg["bounce_wait_minutes"] * 60}
+            return True, "dry run logged" if dry else f"Bounce verified: {out}"
 
     def _cycle(self, w, reason, now, manual):
+        """Run a power cycle whose slot is already reserved. Called WITHOUT the lock (pages are saved first)."""
         dry = self.settings.get("dry_run") and not manual    # dry run only covers automatic actions
         who = "Manual" if manual else "Automatic"
         self.save_pages(w, "before the power cycle")
+        error = via = None
         if dry:
             self.events.add("action", w.key, f"DRY RUN: would power-cycle {w.label} (gateway port {w.port}) - {reason}")
         else:
             try:
                 via = self.client.power_cycle(self.gw_mac, w.port)
             except UniFiError as e:
-                self.events.add("error", w.key, f"{who} power cycle of {w.label} port {w.port} FAILED: {e}")
-                w.last_cycle = now  # don't retry every check; cooldown applies
-                return False, str(e)
-            self.events.add("action", w.key, f"{who} power cycle of {w.label} (gateway port {w.port}) via {via} - {reason}")
-        self._roll_day(w)
-        w.cycles_today += 1
-        w.last_cycle = now
-        w.down_since = w.private_since = None   # timers restart from the next check
-        w.bounced_at = None
-        self.busy = {"wan": w.key, "since": now, "what": "power cycle",
-                     "until": now + self.cfg["recovery_minutes"] * 60}
-        self._waiting_logged = None
-        return True, "dry run logged" if dry else "power cycle sent"
+                error = str(e)
+        done = self.clock()
+        with self.lock:
+            self._roll_day(w)
+            if dry:
+                w.dry["last_cycle"], w.dry["cycles"] = now, w.dry["cycles"] + 1
+            else:
+                w.last_cycle = now  # also after a failure: don't retry every check; cooldown applies
+            if error:
+                self.events.add("error", w.key, f"{who} power cycle of {w.label} port {w.port} FAILED: {error}")
+                self.busy = None
+                return False, error
+            if not dry:
+                w.cycles_today += 1
+                self.events.add("action", w.key, f"{who} power cycle of {w.label} (gateway port {w.port}) via {via} - {reason}")
+            w.down_since = w.private_since = None   # timers restart from the next check
+            w.bounced_at = None
+            self.busy = {"wan": w.key, "since": done, "what": "power cycle",
+                         "until": done + self.cfg["recovery_minutes"] * 60}
+            return True, "dry run logged" if dry else "power cycle sent"
 
     def apply_config(self, cfg):
         """Settings page saved: new limits apply from the next check; WAN names/ports/order update in place."""
@@ -482,6 +535,8 @@ class Monitor(threading.Thread):
         today = date.today().isoformat()
         if w.cycle_day != today:
             w.cycle_day, w.cycles_today = today, 0
+        if w.dry["day"] != today:
+            w.dry["day"], w.dry["cycles"] = today, 0
 
     def _manual_guard(self, key):
         try:
@@ -504,7 +559,9 @@ class Monitor(threading.Thread):
                 return False, err
             if not self.gw_mac:
                 return False, "gateway not read yet - try again in a moment"
-            return self._cycle(w, "requested from the web page", self.clock(), manual=True)
+            now = self.clock()
+            self._reserve(w, "power cycle", now)
+        return self._cycle(w, "requested from the web page", now, manual=True)
 
     def manual_bounce(self, key):
         with self.lock:
@@ -515,7 +572,9 @@ class Monitor(threading.Thread):
                 return False, "port-bounce access isn't working - see the status card"
             if not w.ifname:
                 return False, f"{w.label}'s gateway interface isn't known yet"
-            return self._bounce(w, "requested from the web page", self.clock(), manual=True)
+            now = self.clock()
+            self._reserve(w, "bounce", now)
+        return self._bounce(w, "requested from the web page", now, manual=True)
 
     def snapshot(self):
         with self.lock:

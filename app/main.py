@@ -161,6 +161,13 @@ def check_csrf():
             abort(400, "bad CSRF token - reload the page")
 
 
+def safe_next(nxt):
+    """Only a path on this site: browsers treat '//host' and '/\\host' as another site, so those go to '/'."""
+    if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt or any(ord(c) < 32 for c in nxt):
+        return "/"
+    return nxt
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     ip = request.remote_addr or "?"
@@ -177,8 +184,7 @@ def login():
             session.permanent = True
             failed_logins.pop(ip, None)
             events.add("info", None, f"Login from {ip}")
-            nxt = request.args.get("next", "/")
-            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else "/")
+            return redirect(safe_next(request.args.get("next", "/")))
         recent.append(now)
         events.add("warn", None, f"Failed login from {ip}")
         return render_template("login.html", error="Wrong password."), 401
@@ -345,10 +351,21 @@ def bounce_check():
     if not bouncer.configured():
         flash("No SSH key at /data/ssh/id_ed25519", "error")
     else:
-        with monitor.lock:
-            ok = monitor.check_bounce_access()
+        ok = monitor.check_bounce_access()
         flash("Port-bounce access works" if ok else "Port-bounce access is NOT working - see the log",
               "ok" if ok else "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/bounce-forget-host-key")
+@login_required
+def bounce_forget_host_key():
+    bouncer.forget_host_key()
+    events.add("warn", None, "Stored gateway SSH host key forgotten from the web page; the next connection "
+                             "trusts the gateway's current key")
+    ok = monitor.check_bounce_access() if bouncer.configured() else False
+    flash("Host key forgotten - port-bounce access works again" if ok else
+          "Host key forgotten, but port-bounce access still isn't working - see the log", "ok" if ok else "error")
     return redirect(url_for("dashboard"))
 
 
@@ -403,7 +420,11 @@ def captures_combined():
     if not wans:
         return redirect(url_for("captures"))
     wan = request.args.get("wan") or wans[0].key
-    days = max(1, min(int(request.args.get("days", 30) or 30), cfg["capture_keep_days"]))
+    try:
+        days = int(request.args.get("days") or 30)
+    except ValueError:
+        days = 30
+    days = max(1, min(days, cfg["capture_keep_days"]))
     cutoff = (datetime.now().timestamp() - days * 86400)
     names = [n for n in capturer.list(wan) if datetime.strptime(n[:15], "%Y%m%d-%H%M%S").timestamp() >= cutoff]
     page_keys = []

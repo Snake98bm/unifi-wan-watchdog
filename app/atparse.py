@@ -116,6 +116,20 @@ def _unique(rows):
     return out
 
 
+def _grid_html(title, headers, rows, classes=(), empty=None):
+    """<h2> + the AT&T-style "grid" table with alternating a/b rows; classes = optional class per column."""
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    out = [f"<h2>{html.escape(title)}</h2>", f'<table class="grid"><tr>{head}</tr>']
+    for i, row in enumerate(rows):
+        tds = "".join((f'<td class="{classes[j]}">' if j < len(classes) and classes[j] else "<td>")
+                      + html.escape(str(v)) + "</td>" for j, v in enumerate(row))
+        out.append(f'<tr class="{"ab"[i % 2]}">{tds}</tr>')
+    out.append("</table>")
+    if not rows and empty:
+        out.append(f"<h3>{html.escape(empty)}</h3>")
+    return "\n".join(out)
+
+
 def text_html(title, body):
     """A plain-text or JSON answer (toolkit endpoints like get_uptime, get_watchcat_status) as a Field | Value table."""
     s = (body or "").strip()
@@ -134,11 +148,7 @@ def text_html(title, body):
                     ("load average", m.group(2).strip())]
         else:
             rows = [("answer", ln.strip()) for ln in s.splitlines() if ln.strip()]
-    out = [f"<h2>{html.escape(title)}</h2>", '<table class="grid"><tr><th>Field</th><th>Value</th></tr>']
-    for i, (k, v) in enumerate(_unique(rows)):
-        out.append(f'<tr class="{"ab"[i % 2]}"><td class="heading">{html.escape(k)}</td><td>{html.escape(v)}</td></tr>')
-    out.append("</table>")
-    return "\n".join(out)
+    return _grid_html(title, ("Field", "Value"), _unique(rows), ("heading",))
 
 
 LOG_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d\d:?\d\d|Z)?)\s+\S+\s+([^:\[]+)(?:\[\d+\])?:\s*(.*)$")
@@ -147,26 +157,13 @@ LOG_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d\d:?\d\d|Z)?)\s+\S+
 def gateway_log_html(title, text):
     """Dream Machine syslog lines ('2026-11-03T03:00:26-08:00 host proc[pid]: msg') as a Time | Process | Message
     table, so the 30-day view merges them into one WAN event log."""
-    out = [f"<h2>{html.escape(title)}</h2>", '<table class="grid"><tr><th>Time</th><th>Process</th><th>Message</th></tr>']
-    n = 0
+    rows = []
     for ln in (text or "").splitlines():
         m = LOG_LINE_RE.match(ln.strip())
-        if not m:
-            continue
-        t, proc, msg = m.group(1)[:19].replace("T", " "), m.group(2).strip(), m.group(3)
-        out.append(f'<tr class="{"ab"[n % 2]}"><td>{html.escape(t)}</td><td>{html.escape(proc)}</td>'
-                   f'<td class="left">{html.escape(msg)}</td></tr>')
-        n += 1
-    out.append("</table>")
-    if not n:
-        out.append("<h3>no matching log lines</h3>")
-    return "\n".join(out)
+        if m:
+            rows.append((m.group(1)[:19].replace("T", " "), m.group(2).strip(), m.group(3)))
+    return _grid_html(title, ("Time", "Process", "Message"), rows, ("", "", "left"), empty="no matching log lines")
 
 
 def at_html(cmd, lines):
-    rows = _unique(_rows(cmd, lines))
-    out = [f"<h2>{html.escape(cmd)}</h2>", '<table class="grid"><tr><th>Field</th><th>Value</th></tr>']
-    for i, (k, v) in enumerate(rows):
-        out.append(f'<tr class="{"ab"[i % 2]}"><td class="heading">{html.escape(k)}</td><td>{html.escape(v)}</td></tr>')
-    out.append("</table>")
-    return "\n".join(out)
+    return _grid_html(cmd, ("Field", "Value"), _unique(_rows(cmd, lines)), ("heading",))
