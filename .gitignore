@@ -1,0 +1,15 @@
+# secrets and local data - never commit
+.env
+*.env
+!.env.example
+data/
+captures/
+*.db
+settings.json
+secret_key
+id_ed25519*
+known_hosts
+
+# python
+__pycache__/
+*.pyc

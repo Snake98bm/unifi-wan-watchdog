@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card" style="max-width: 720px; margin: 0 auto;">
+  <h2>Update WANs from the Dream Machine</h2>
+  <p class="muted">Names come from UniFi's WAN networks (WAN = WAN 1, WAN2 = WAN 2); ports are where the Dream Machine
+    has each WAN right now. The modem fingerprints are kept, so if a modem really moved to another port the safety
+    checks still compare it with the modem that was learned.</p>
+  <div class="table-wrap"><table>
+    <tr><th>WAN</th><th>Setting</th><th>Now</th><th>Dream Machine</th></tr>
+    {% for r in rows %}<tr>
+      <td>{{ "WAN 1" if r.wan == "wan1" else "WAN 2" }}</td><td>{{ r.field }}</td><td>{{ r.current }}</td>
+      <td>{% if r.changed %}<b>{{ r.new }}</b>{% else %}{{ r.new }} <span class="muted">(same)</span>{% endif %}
+        {% if r.field == "gateway port" and r.ifname %}<span class="muted">({{ r.ifname }})</span>{% endif %}</td>
+    </tr>{% else %}<tr><td colspan="4" class="muted">The Dream Machine didn't report any WANs.</td></tr>{% endfor %}
+  </table></div>
+  <div style="display: flex; gap: 10px; margin-top: 14px;">
+    {% if changes %}
+    <form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="primary">Apply these changes</button></form>
+    {% else %}<p>Everything already matches.</p>{% endif %}
+    <a href="{{ url_for('all_settings') }}"><button type="button">Back</button></a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,2 @@
+# keep Unix line endings everywhere: the gateway script and the container run on Linux
+* text=auto eol=lf

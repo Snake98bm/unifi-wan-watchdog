@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>Diagnostics</h2>
+  <p class="muted">What the UniFi API returns for the gateway, its WANs and the configured ports. The API key is never shown.</p>
+  <pre>{{ diag | tojson(indent=2) }}</pre>
+</div>
+{% endblock %}

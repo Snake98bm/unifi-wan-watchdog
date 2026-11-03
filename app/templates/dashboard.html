@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block head %}<noscript><meta http-equiv="refresh" content="30"></noscript>
+<script>
+// reload every 30 s, but never while a confirmation pop-up is open
+(function tick() { setTimeout(function () {
+  if (document.querySelector("dialog[open]")) { tick(); } else { location.reload(); } }, 30000); })();
+</script>
+<style>
+dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); max-width: 400px; width: calc(100% - 32px); padding: 18px 20px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog h3 { margin: 0 0 8px; font-size: 17px; }
+dialog p { margin: 6px 0; }
+dialog .ok { color: var(--up); } dialog .bad { color: var(--down); } dialog .warn { color: var(--warn); }
+dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+</style>{% endblock %}
+{% block body %}
+{% if s.last_error %}<div class="banner err">{{ s.last_error }}</div>{% endif %}
+{% if s.settings.dry_run %}<div class="banner">Dry run is ON: the watchdog only logs what it would do on its own. The Bounce and Power-cycle buttons below still really act.</div>{% endif %}
+{% if not s.settings.enabled %}<div class="banner">Automation is OFF: the watchdog only watches and logs.</div>{% endif %}
+{% if s.busy %}<div class="banner">{{ s.busy.label }} was {{ "bounced" if s.busy.what == "bounce" else "power-cycled" }} {{ (s.now - s.busy.since)|dur }} ago. Other WANs wait up to {{ s.busy.left|dur }} (one at a time).</div>{% endif %}
+
+<div class="cards">
+{% for w in s.wans %}
+  <div class="card">
+    <h2>{{ w.label }} <span class="pill {{ w.state }}">{{ w.state }}</span></h2>
+    <dl>
+      <dt>IP</dt><dd>{{ w.ip or "none" }}</dd>
+      <dt>Gateway port</dt><dd>{{ w.port }}{% if w.ifname %} ({{ w.ifname }}){% endif %} &middot; link {{ "up" if w.link else ("down" if w.link is not none else "?") }}</dd>
+      <dt>PoE</dt><dd>{% if w.poe %}{{ w.poe.mode or "?" }}{% if w.poe.power %}, {{ w.poe.power }} W{% endif %}{% else %}?{% endif %}</dd>
+      {% if w.down_for is not none %}<dt>Down for</dt><dd>{{ w.down_for|dur }} (cycle after {{ s.cfg.down_minutes }} min)</dd>{% endif %}
+      {% if w.private_for is not none %}<dt>Private for</dt><dd>{{ w.private_for|dur }} (cycle after {{ s.cfg.private_minutes }} min)</dd>{% endif %}
+      <dt>Last bounce</dt><dd>{{ w.last_bounce|when }}</dd>
+      <dt>Last cycle</dt><dd>{{ w.last_cycle|when }}</dd>
+      <dt>Cycles today</dt><dd>{{ w.cycles_today }} of {{ s.cfg.max_cycles_per_day }}</dd>
+      <dt>Safety checks</dt><dd>{% if w.problems %}<span style="color: var(--down);">FAILING</span>{% elif w.port_ifname %}<span style="color: var(--up);">OK</span> &middot; port {{ w.port }} = {{ w.port_ifname }} on {{ (w.port_network or "?")|upper }}{% if w.fingerprint %}, {{ w.fingerprint.values()|join(", ") }}{% endif %}{% else %}?{% endif %}</dd>
+    </dl>
+    {% if w.problems %}<p class="note" style="color: var(--down);">Won't touch this port: {{ w.problems|join("; ") }}</p>{% endif %}
+    {% if w.note and not w.problems %}<p class="note">{{ w.note }}</p>{% endif %}
+    <p style="display: flex; flex-wrap: wrap; gap: 8px;">
+      {% if s.bounce.ok %}<button type="button" onclick="document.getElementById('dlg-bounce-{{ w.key }}').showModal()">Bounce {{ w.label }} port&hellip;</button>{% endif %}
+      <button type="button" class="danger" onclick="document.getElementById('dlg-cycle-{{ w.key }}').showModal()">Power-cycle {{ w.label }}&hellip;</button>
+    </p>
+    {% for action in (["bounce", "cycle"] if s.bounce.ok else ["cycle"]) %}
+    <dialog id="dlg-{{ action }}-{{ w.key }}">
+      <h3>{{ "Bounce " ~ w.label ~ " port?" if action == "bounce" else "Power-cycle " ~ w.label ~ "?" }}</h3>
+      <p>{% if action == "bounce" %}Port {{ w.port }} link drops a few seconds; modem stays on.
+         {% else %}Cuts PoE on port {{ w.port }}{% if w.poe and w.poe.power %} ({{ w.poe.power }} W){% endif %}; modem restarts.{% endif %}</p>
+      {% if w.problems %}<p class="bad">&#10007; {{ w.problems|join("; ") }}</p>
+      {% else %}<p class="ok">&#10003; Port and modem checks OK</p>{% endif %}
+      {% if w.is_uplink %}<p class="warn">&#9888; Primary WAN: connections will drop.</p>{% endif %}
+      {% for o in s.wans if o.key != w.key and o.state != "up" %}<p class="warn">&#9888; {{ o.label }} is {{ o.state }}: you may lose internet.</p>{% endfor %}
+      {% if s.busy %}<p class="warn">&#9888; {{ s.busy.label }} still recovering: this will be refused.</p>{% endif %}
+      <form method="post" action="{{ url_for('bounce' if action == 'bounce' else 'cycle', key=w.key) }}" class="row">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
+        {% if not w.problems %}<button class="danger">{{ "Bounce" if action == "bounce" else "Power-cycle" }}</button>{% endif %}
+      </form>
+    </dialog>
+    {% endfor %}
+    {% if w.key in s.capture_keys %}
+    <form method="post" action="{{ url_for('capture_now', key=w.key) }}" style="margin-top: 8px;">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button>Save {{ w.label }} modem logs now</button>
+    </form>
+    <p class="muted">Also saved before every power cycle.</p>
+    {% endif %}
+  </div>
+{% endfor %}
+  <div class="card">
+    <h2>Port bounce
+      {% if not s.bounce.configured %}<span class="pill unknown">no key</span>
+      {% elif s.bounce.ok %}<span class="pill up">working</span>
+      {% elif s.bounce.ok is none %}<span class="pill unknown">not checked</span>
+      {% else %}<span class="pill down">not working</span>{% endif %}</h2>
+    <p class="muted">Automation bounces first (link down 5 s, modem stays on), then PoE-cycles if still bad after
+      {{ s.cfg.bounce_wait_minutes }} min. Access checked at startup and after firmware updates.</p>
+    <dl>
+      <dt>Gateway firmware</dt><dd>{{ s.gw_version or "?" }}</dd>
+      <dt>Last check</dt><dd>{{ s.bounce.checked|when }}</dd>
+      <dt>Result</dt><dd>{{ s.bounce.detail }}</dd>
+    </dl>
+    {% if s.bounce.configured and not s.bounce.ok %}<p class="note">Run gateway/install-bounce.sh on the Dream Machine to (re)enable it. Until then problems go straight to the PoE power cycle.</p>{% endif %}
+    <form method="post" action="{{ url_for('bounce_check') }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button>Check now</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Settings</h2>
+    <form method="post" action="{{ url_for('update_settings') }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <p><label><input type="checkbox" name="enabled" {{ "checked" if s.settings.enabled }}> Automation</label>
+         <label><input type="checkbox" name="dry_run" {{ "checked" if s.settings.dry_run }}> Dry run</label></p>
+      {% if has_capture %}
+      <p><label>Save modem logs
+        <select name="capture_schedule">
+          {% for k, label in schedules.items() %}<option value="{{ k }}" {{ "selected" if s.settings.capture_schedule == k }}>{{ label }}</option>{% endfor %}
+        </select></label></p>
+      {% endif %}
+      <button class="primary">Save</button>
+    </form>
+    <p class="muted">Only one WAN is reset at a time; if both need it, {{ s.wans[0].label }} goes first.
+      Acts after {{ s.cfg.down_minutes }} min down or {{ s.cfg.private_minutes }} min on a private IP.
+      Cooldown {{ s.cfg.cooldown_minutes }} min, recovery window {{ s.cfg.recovery_minutes }} min.
+      Last check: {{ s.last_check|when }}. <a href="{{ url_for('all_settings') }}">All settings</a></p>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 16px;">
+  <h2>Recent events <a href="{{ url_for('log') }}" style="font-size: 14px; font-weight: normal;">full log</a></h2>
+  <div class="table-wrap"><table>
+    {% for e in log %}<tr><td class="ts">{{ e.ts|when }}</td><td class="lvl-{{ e.level }}">{{ e.level }}</td><td>{{ e.message }}</td></tr>
+    {% else %}<tr><td class="muted">No events yet.</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endblock %}

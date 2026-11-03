@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+/* AT&T box look (colours from its baseINID.css / INID.css) */
+.att { background: #fff; color: #191919; border: 1px solid #ccc; border-radius: 6px; padding: 12px 16px; overflow-x: auto; }
+.att h1, .att h2, .att h3 { color: #0568ae; font-size: 18px; margin: 16px 0 8px; }
+.att table { border-collapse: separate; border-spacing: 0; margin-bottom: 14px; min-width: 50%; }
+.att table:not(.grid) td, .att table:not(.grid) th { border: 0; padding: 3px 12px 3px 0; text-align: left; color: #191919; background: transparent; }
+.att table:not(.grid) th { font-weight: bold; }
+.att table.grid { border: 1px solid #0568ae; background: #71c5e8; border-spacing: 2px; }
+.att table.grid th { color: #fff; background: #0568ae; padding: 6px 8px; text-align: center; font-weight: bold; }
+.att table.grid td { background: #fff; color: #191919; padding: 6px 8px; text-align: center; border: 0; }
+.att table.grid tr.a td, .att table.grid tr:nth-child(even) td { background: #f2f2f2; }
+.att table.grid tr.b td { background: #fff; }
+.att table.grid tr.special td { background: #d2d2d2; }
+.att table.grid td.heading { font-weight: bold; text-align: left; }
+.att table.grid td.left, .att table.grid th.left { text-align: left; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px; }
+.toolbar select, .toolbar input { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.tabs a { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; color: var(--text); }
+.tabs a.on { background: #0568ae; border-color: #0568ae; color: #fff; }
+</style>
+
+<div class="card">
+  <h2>Modem logs</h2>
+  {% if view == "none" %}
+  <p class="muted">No modem pages are configured (CAPTURE_WAN2 in the compose file).</p>
+  {% else %}
+  <div class="tabs">
+    <a href="{{ url_for('captures', wan=wan) }}" class="{{ 'on' if view == 'one' }}">By date</a>
+    <a href="{{ url_for('captures_combined', wan=wan, days=30) }}" class="{{ 'on' if view == 'combined' }}">Last 30 days combined</a>
+  </div>
+
+  {% if view == "one" %}
+  <form method="get" class="toolbar">
+    {% if wans|length > 1 %}<select name="wan" onchange="this.form.submit()">{% for w in wans %}<option value="{{ w.key }}" {{ "selected" if w.key == wan }}>{{ w.label }}</option>{% endfor %}</select>{% else %}<input type="hidden" name="wan" value="{{ wan }}">{% endif %}
+    <label>Date <input type="date" name="date" value="{{ day }}" onchange="this.form.submit()"
+      {% if dates %}min="{{ dates[-1] }}" max="{{ dates[0] }}"{% endif %}></label>
+    {% if names %}
+    <label>Time <select name="name" onchange="this.form.submit()">
+      {% for n, t, why in names %}<option value="{{ n }}" {{ "selected" if n == name }}>{{ t }}{% if why %} {{ why }}{% endif %}</option>{% endfor %}
+    </select></label>
+    {% endif %}
+    <noscript><button>Show</button></noscript>
+  </form>
+  {% if not names %}
+    <p class="muted">Nothing saved on {{ day }}.{% if dates %} Days with logs: {% for d in dates[:10] %}<a href="{{ url_for('captures', wan=wan, date=d) }}">{{ d }}</a>{{ ", " if not loop.last }}{% endfor %}{% endif %}</p>
+  {% else %}
+  <div class="tabs">
+    {% for k in page_keys %}<a href="{{ url_for('captures', wan=wan, date=day, name=name, page=k) }}" class="{{ 'on' if k == page }}">{{ k }}</a>{% endfor %}
+    <a href="{{ url_for('capture_text', name=name) }}">plain text</a>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if view == "combined" %}
+  <form method="get" class="toolbar">
+    <input type="hidden" name="wan" value="{{ wan }}">
+    <label>Days <select name="days" onchange="this.form.submit()">{% for d in [1, 7, 14, 30, 45] %}<option {{ "selected" if d == days }}>{{ d }}</option>{% endfor %}</select></label>
+    <span class="muted">{{ count }} capture(s)</span>
+  </form>
+  <div class="tabs">
+    {% for k in page_keys %}<a href="{{ url_for('captures_combined', wan=wan, days=days, page=k) }}" class="{{ 'on' if k == page }}">{{ k }}</a>{% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if view == "one" and body %}
+<div class="att" style="margin-top: 16px;">{{ body|safe }}</div>
+{% endif %}
+
+{% if view == "combined" and page %}
+<div class="att" style="margin-top: 16px;">
+  {% if log %}
+    <h2>{{ page }}: {{ log[1]|length }} unique entries, last {{ days }} days</h2>
+    <table class="grid">
+      <tr>{% for h in log[0] %}<th>{{ h }}</th>{% endfor %}</tr>
+      {% for r in log[1] %}<tr class="{{ loop.cycle('b', 'a') }}">{% for c in r %}<td>{{ c }}</td>{% endfor %}</tr>{% endfor %}
+    </table>
+  {% elif sections %}
+    <p style="color:#5d6875;">One column per day (the last capture of that day), oldest on the left.</p>
+    {% for sec in sections %}
+    <h2>{{ sec.title }}</h2>
+    <table class="grid">
+      <tr><th class="left"></th>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+      {% for label in sec.labels %}<tr class="{{ loop.cycle('b', 'a') }}"><td class="heading">{{ label }}</td>{% for v in sec.rows[label] %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}
+    </table>
+    {% endfor %}
+  {% else %}
+    <p>No tables found on this page.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

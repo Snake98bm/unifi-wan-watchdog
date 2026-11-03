@@ -1,0 +1,35 @@
+services:
+  wan-watchdog:
+    image: local/wan-watchdog:1
+    container_name: wan-watchdog
+    hostname: wan-watchdog
+    restart: unless-stopped
+    mac_address: "02:42:c0:a8:01:32"   # any fixed locally administered MAC, so the gateway sees one stable client
+    networks:
+      lan:
+        ipv4_address: ${WATCHDOG_IP:?set WATCHDOG_IP in .env}
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+    volumes:
+      - /docker/wan-watchdog:/data
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      # Addresses and secrets all come from .env. Everything else is on the web page's Settings tab
+      # (saved in /data/settings.json).
+      UNIFI_URL: ${UNIFI_URL:?set UNIFI_URL in .env}
+      ATT_GATEWAY: ${ATT_GATEWAY:-192.168.1.254}
+      UNIFI_API_KEY: ${UNIFI_API_KEY:?set UNIFI_API_KEY in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      ATT_ACCESS_CODE: ${ATT_ACCESS_CODE:-}
+      QUECTEL_GATEWAY: ${QUECTEL_GATEWAY:-192.168.225.1}
+      QUECTEL_USER: ${QUECTEL_USER:-}
+      QUECTEL_PASSWORD: ${QUECTEL_PASSWORD:-}
+
+networks:
+  lan:
+    external: true
+    name: ${WATCHDOG_NETWORK:?set WATCHDOG_NETWORK in .env}

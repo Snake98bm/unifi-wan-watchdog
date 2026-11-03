@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>Event log</h2>
+  <form method="get" style="margin-bottom: 10px;">
+    <select name="wan" onchange="this.form.submit()">
+      <option value="">All WANs</option>
+      {% for w in s.wans %}<option value="{{ w.key }}" {{ "selected" if wan == w.key }}>{{ w.label }}</option>{% endfor %}
+    </select>
+    <select name="level" onchange="this.form.submit()">
+      <option value="">All levels</option>
+      {% for l in ["action", "error", "warn", "info"] %}<option {{ "selected" if level == l }}>{{ l }}</option>{% endfor %}
+    </select>
+  </form>
+  <div class="table-wrap"><table>
+    <tr><th>Time</th><th>Level</th><th>Message</th></tr>
+    {% for e in log %}<tr><td class="ts">{{ e.ts|when }}</td><td class="lvl-{{ e.level }}">{{ e.level }}</td><td>{{ e.message }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">No events.</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endblock %}

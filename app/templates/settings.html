@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+.set-cards { display: flex; flex-direction: column; gap: 16px; max-width: 900px; margin: 0 auto; }
+.set-cards .card, .set-top { max-width: 900px; margin-left: auto; margin-right: auto; }
+.set-grid { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 6px 16px; align-items: start; }
+.set-grid > * { min-width: 0; }
+.set-grid .help { grid-column: 1 / -1; margin: -2px 0 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.set-grid input[type=number], .set-grid input[type=text], .set-grid select, textarea {
+  font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); width: 100%; }
+textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-height: 120px; }
+.set-grid .wide { grid-column: 1 / -1; }
+.default { font-size: 12px; color: var(--muted); }
+@media (max-width: 560px) { .set-grid { grid-template-columns: 1fr; } }
+</style>
+<div class="card set-top" style="margin-bottom: 16px;">
+  <h2>Addresses <span class="muted" style="font-size: 13px; font-weight: normal;">set in the stack's .env</span></h2>
+  <dl>{% for k, v in addresses.items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl>
+  <p><a href="{{ url_for('settings_from_gateway') }}"><button type="button">Update WAN names and ports from the Dream Machine&hellip;</button></a></p>
+</div>
+<div class="card set-top" style="margin-bottom: 16px;">
+  <h2>Modem fingerprints <span class="muted" style="font-size: 13px; font-weight: normal;">used to detect swapped cables</span></h2>
+  <p class="muted">Learned the first time each WAN is healthy. Before any bounce or power cycle the watchdog checks the
+    port still belongs to that WAN and the modem on it still matches; otherwise it refuses.</p>
+  <dl>{% for k, n in wan_names.items() %}<dt>{{ n }}</dt><dd>{% set fp = values.get(k ~ "_fingerprint") %}
+    {% if fp %}{% for a, b in fp.items() %}{{ a }} {{ b }}{{ ", " if not loop.last }}{% endfor %}{% else %}not learned yet{% endif %}
+    <form method="post" action="{{ url_for('relearn', key=k) }}" style="display: inline; margin-left: 8px;"
+          onsubmit="return confirm('Forget {{ n }}\'s modem fingerprint and learn it again?');">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>Re-learn</button></form></dd>{% endfor %}</dl>
+</div>
+<form method="post">
+<input type="hidden" name="csrf" value="{{ csrf_token() }}">
+<div class="set-cards">
+{% for g in groups %}
+  <div class="card">
+    <h2>{{ g }}</h2>
+    <div class="set-grid">
+    {% for key, f in fields.items() if f[0] == g %}
+      {% set kind = f[2] %}
+      {% if kind == "bool" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><input type="checkbox" id="{{ key }}" name="{{ key }}" {{ "checked" if values[key] in (true, "on") }}></div>
+      {% elif kind == "int" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><input type="number" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" min="{{ f[4] }}" max="{{ f[5] }}" required>
+          <div class="default">default {{ defaults[key] }} &middot; {{ f[4] }}&ndash;{{ f[5] }}</div></div>
+      {% elif kind == "aturl" %}
+        <label for="{{ key }}" class="wide">{{ f[1] }}</label>
+        <div class="wide"><input type="text" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" spellcheck="false"></div>
+      {% elif kind == "text" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><input type="text" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" maxlength="40" required></div>
+      {% elif kind == "wan" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><select id="{{ key }}" name="{{ key }}">{% for k, n in wan_names.items() %}<option value="{{ k }}" {{ "selected" if values[key] == k }}>{{ n }}</option>{% endfor %}</select></div>
+      {% elif kind == "schedule" %}
+        <label for="{{ key }}">{{ f[1] }}</label>
+        <div><select id="{{ key }}" name="{{ key }}">{% for k, n in schedules.items() %}<option value="{{ k }}" {{ "selected" if values[key] == k }}>{{ n }}</option>{% endfor %}</select></div>
+      {% elif kind == "urls" %}
+        <label for="{{ key }}" class="wide">{{ f[1] }}
+          {% set wk = key.split("_")[1] %}<span class="default">&middot; login {{ "set" if codes.get(wk) else "not set" }}</span></label>
+        <div class="wide"><textarea id="{{ key }}" name="{{ key }}" spellcheck="false">{{ values[key] }}</textarea></div>
+      {% endif %}
+      {% if f[6] %}<div class="help">{{ f[6] }}</div>{% endif %}
+    {% endfor %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+<p class="set-top" style="margin-top: 16px;"><button class="primary">Save settings</button>
+  <span class="muted">Saved in /data/settings.json; applies from the next check, no redeploy needed.
+  The API key, web password and modem logins stay in the stack's .env.</span></p>
+</form>
+<form method="post" action="{{ url_for('reset_settings') }}" onsubmit="return confirm('Reset all settings to the defaults? (Automation and Dry run stay as they are)');">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <button>Reset to defaults</button>
+</form>
+{% endblock %}

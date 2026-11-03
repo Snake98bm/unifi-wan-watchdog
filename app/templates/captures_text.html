@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h2>{{ name }} (plain text) <a href="{{ url_for('captures', name=name, date=name[:4] ~ '-' ~ name[4:6] ~ '-' ~ name[6:8]) }}" style="font-size: 14px; font-weight: normal;">back</a></h2>
+</div>
+{% for title, text in files %}
+<div class="card" style="margin-top: 16px;">
+  <h2>{{ title }}</h2>
+  <pre>{{ text }}</pre>
+</div>
+{% endfor %}
+{% endblock %}
