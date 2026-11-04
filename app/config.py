@@ -62,6 +62,19 @@ FIELDS = {
     "capture_schedule": ("Modem logs", "Save modem logs", "schedule", "hourly", None, None,
                          "Pages are always saved before a power cycle as well."),
     "capture_keep_days": ("Modem logs", "Keep saved logs (days)", "int", 45, 1, 365, ""),
+    "box_reboot": ("Modem reboot", "Auto-reboot the modem", "bool", False, None, None,
+                   "On = once a day, in the hour below, reboot the whole AT&T/Arris modem (its Device -> Restart "
+                   "page) when its internet-probe latency has been high. The BGW210's latency climbs with its own "
+                   "uptime and only a full reboot clears it - a line/DSL reset does not. Needs the WAN's access "
+                   "code, and the internet probe for the latency check. The modem is offline about 3 minutes; the "
+                   "watchdog holds off its own bounce/power-cycle while it reboots."),
+    "box_reboot_wan": ("Modem reboot", "Which WAN's modem", "wan", "wan2", None, None,
+                       "The WAN whose modem is rebooted (the one behind the access-code login)."),
+    "box_reboot_hour": ("Modem reboot", "Reboot during hour (0-23, local)", "int", 4, 0, 23,
+                        "Checked once a day in this hour; pick a quiet time."),
+    "box_reboot_latency_ms": ("Modem reboot", "Only if the last hour averaged at least (ms)", "int", 90, 0, 2000,
+                              "Average internet-probe latency over the hour before. 0 = reboot every day regardless "
+                              "of latency."),
     "wan1_label": ("WANs", "WAN 1 name", "text", "Verizon", None, None, ""),
     "wan1_port": ("WANs", "WAN 1 gateway port", "int", 8, 1, 11, "Port number on the UniFi gateway (the WAN cable's port)."),
     "capture_wan1": ("WANs", "WAN 1 modem pages to save", "urls",
@@ -97,7 +110,7 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "WANs"]
+GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "Modem reboot", "WANs"]
 WEB_URL_RE = re.compile(r"^https?://[^\s/]+(/\S*)?$")
 MAX_BAN_URLS = 4
 

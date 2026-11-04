@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 from capture import Capturer  # noqa: E402
 
 CODE = "test-code-123"
-STATE = {"nonce": None, "sessions": set(), "authed": set(), "logins": 0}
+STATE = {"nonce": None, "sessions": set(), "authed": set(), "logins": 0, "rebooted": False}
 LOGIN_NO_COOKIE = "<html><h1>Access Code Required</h1>Cookies must be enabled in your browser to log in.</html>"
 
 
@@ -50,6 +50,14 @@ class FakeBox(http.server.BaseHTTPRequestHandler):
             sid = secrets.token_hex(4)
             STATE["sessions"].add(sid)
             return self._send(LOGIN_NO_COOKIE, sid)
+        if self.path.endswith("restart.ha"):
+            STATE["nonce"] = secrets.token_hex(8)
+            if sid in STATE["authed"]:                  # authenticated: the real Restart page + button
+                return self._send(f'<form method="post" action="/cgi-bin/restart.ha">'
+                                  f'<input type="hidden" name="nonce" value="{STATE["nonce"]}" />'
+                                  f'<input type="submit" name="Restart" value="Restart" /></form>')
+            return self._send(f'<h1>Access Code Required</h1><form method="post" action="/cgi-bin/login.ha">'
+                              f'<input type="hidden" name="nonce" value="{STATE["nonce"]}" /></form>')
         if sid in STATE["authed"]:
             return self._send("<table><tr><td>syslog</td><td>DSL line trained</td></tr></table>")
         STATE["nonce"] = secrets.token_hex(8)
@@ -57,8 +65,12 @@ class FakeBox(http.server.BaseHTTPRequestHandler):
                           f'<input type="hidden" name="nonce" value="{STATE["nonce"]}" /></form>')
 
     def do_POST(self):
-        STATE["logins"] += 1
         form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+        if self.path.endswith("restart.ha"):           # the reboot trigger
+            if self._sid() in STATE["authed"] and form.get("Restart"):
+                STATE["rebooted"] = True
+            return self._send("ok")
+        STATE["logins"] += 1
         ok = form.get("hashpassword") == [hashlib.md5((CODE + STATE["nonce"]).encode()).hexdigest()]
         if ok and set(form["password"][0]) == {"*"}:   # plain code must never be sent
             STATE["authed"].add(self._sid())
@@ -77,8 +89,38 @@ class CaptureTests(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        STATE.update(nonce=None, sessions=set(), authed=set(), logins=0, at=[])
+        STATE.update(nonce=None, sessions=set(), authed=set(), logins=0, at=[], rebooted=False)
         self.dir = tempfile.mkdtemp()
+
+    def host(self):
+        return f"127.0.0.1:{self.server.server_address[1]}"
+
+    def test_reboot_modem_authenticates_then_posts_restart(self):
+        from capture import reboot_modem
+        reboot_modem(self.host(), CODE)
+        self.assertTrue(STATE["rebooted"])              # got through login + Restart POST
+        self.assertEqual(STATE["logins"], 1)
+
+    def test_reboot_wrong_code_raises_and_does_not_restart(self):
+        from capture import reboot_modem
+        with self.assertRaises(PermissionError):
+            reboot_modem(self.host(), "wrong")
+        self.assertFalse(STATE["rebooted"])
+
+    def test_reboot_without_code_raises(self):
+        from capture import reboot_modem
+        with self.assertRaises(PermissionError):
+            reboot_modem(self.host(), None)
+        self.assertFalse(STATE["rebooted"])
+
+    def test_capturer_reboot_uses_host_and_code(self):
+        cap = Capturer(self.dir, {}, {"wan2": CODE}, reboot_hosts={"wan2": self.host()})
+        self.assertTrue(cap.can_reboot("wan2"))
+        self.assertFalse(cap.can_reboot("wan1"))        # no host/code for wan1
+        cap.reboot("wan2")
+        self.assertTrue(STATE["rebooted"])
+        with self.assertRaises(RuntimeError):           # no host configured
+            Capturer(self.dir, {}, {"wan2": CODE}).reboot("wan2")
 
     def at_items(self):
         import config

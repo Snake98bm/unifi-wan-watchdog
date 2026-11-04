@@ -52,6 +52,27 @@ class FakeBouncer:
         return 0, f"{ifname} back UP at 1000 Mb/s after 6s (link down 5 s)"
 
 
+class FakeRebootCapture:
+    def __init__(self, ok=True):
+        self.ok, self.reboots = ok, []
+
+    def can_reboot(self, key):
+        return True
+
+    def reboot(self, key):
+        self.reboots.append(key)
+        if not self.ok:
+            raise RuntimeError("box unreachable")
+
+
+class FakeProbes:
+    def __init__(self, avg=None):
+        self.avg = avg
+
+    def recent(self, wan, since):
+        return (10, self.avg, 0)
+
+
 # what the real gateway reports (trimmed): AT&T = wan2 on port 1 / eth0, Verizon = wan on port 8 / eth7
 ATT_MODEM = [{"ip": "198.51.100.1", "mac": "88:96:4e:00:00:01"}]
 VZ_MODEM = [{"ip": "203.0.113.9", "mac": "02:00:00:00:00:02"}]   # locally administered: not fingerprinted
@@ -547,6 +568,78 @@ class MonitorTests(unittest.TestCase):
         ok, _ = self.mon.manual_cycle("wan2")
         self.assertFalse(ok)
         self.assertIsNone(self.mon.busy)
+
+    # ---------- modem reboot ----------
+    def _reboot_mon(self, cap_ok=True, avg=None):
+        cap, probes = FakeRebootCapture(cap_ok), FakeProbes(avg)
+        mon = Monitor(CFG, self.gw, self.events, self.settings, clock=self.clock, capture=cap, probe_history=probes)
+        mon.async_captures = False
+        mon.check()
+        return mon, cap
+
+    def test_reboot_box_holds_the_slot_so_no_bounce_during_reboot(self):
+        mon, cap = self._reboot_mon()
+        ok, _ = mon.reboot_box("wan2", "test", manual=True)
+        self.assertTrue(ok)
+        self.assertEqual(cap.reboots, ["wan2"])
+        self.assertEqual(mon.busy["what"], "modem reboot")      # recovery window reserved
+
+    def test_reboot_box_dry_run_only_logs(self):
+        self.settings.set(dry_run=True)
+        mon, cap = self._reboot_mon()
+        ok, _ = mon.reboot_box("wan2", "test")                  # automatic -> dry run
+        self.assertTrue(ok)
+        self.assertEqual(cap.reboots, [])
+        self.assertIsNone(mon.busy)
+        self.assertTrue(any("DRY RUN" in e["message"] and "reboot" in e["message"] for e in self.events.recent()))
+
+    def test_reboot_box_refused_while_busy(self):
+        mon, cap = self._reboot_mon()
+        mon.busy = {"wan": "wan1", "since": 0, "what": "power cycle", "until": 0}
+        ok, _ = mon.reboot_box("wan2", "test", manual=True)
+        self.assertFalse(ok)
+        self.assertEqual(cap.reboots, [])
+
+    def test_reboot_box_failure_frees_the_slot(self):
+        mon, cap = self._reboot_mon(cap_ok=False)
+        ok, _ = mon.reboot_box("wan2", "test", manual=True)
+        self.assertFalse(ok)
+        self.assertIsNone(mon.busy)
+        self.assertTrue(any("Couldn't reboot" in e["message"] for e in self.events.recent()))
+
+    def test_box_reboot_tick_high_latency_reboots_once_a_day(self):
+        import datetime
+        self.settings.set(box_reboot=True, box_reboot_wan="wan2", box_reboot_hour=4, box_reboot_latency_ms=90)
+        mon, cap = self._reboot_mon(avg=150)
+        at4 = datetime.datetime(2026, 11, 5, 4, 0)
+        self.assertTrue(mon.box_reboot_tick(at4))
+        self.assertEqual(cap.reboots, ["wan2"])
+        self.assertFalse(mon.box_reboot_tick(at4))              # same day: not twice
+        self.assertEqual(cap.reboots, ["wan2"])
+
+    def test_box_reboot_tick_low_latency_skips(self):
+        import datetime
+        self.settings.set(box_reboot=True, box_reboot_hour=4, box_reboot_latency_ms=90)
+        mon, cap = self._reboot_mon(avg=35)
+        self.assertFalse(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 4, 0)))
+        self.assertEqual(cap.reboots, [])
+        self.assertTrue(any("latency OK" in e["message"] for e in self.events.recent()))
+
+    def test_box_reboot_tick_off_or_wrong_hour_does_nothing(self):
+        import datetime
+        self.settings.set(box_reboot=True, box_reboot_hour=4, box_reboot_latency_ms=0)
+        mon, cap = self._reboot_mon()
+        self.assertFalse(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 9, 0)))   # wrong hour
+        self.settings.set(box_reboot=False)
+        self.assertFalse(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 4, 0)))   # disabled
+        self.assertEqual(cap.reboots, [])
+
+    def test_box_reboot_tick_threshold_zero_reboots_regardless(self):
+        import datetime
+        self.settings.set(box_reboot=True, box_reboot_hour=3, box_reboot_latency_ms=0)
+        mon, cap = self._reboot_mon(avg=None)                  # no probe data needed when threshold is 0
+        self.assertTrue(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 3, 0)))
+        self.assertEqual(cap.reboots, ["wan2"])
 
     def test_automation_off_only_watches(self):
         self.settings.set(enabled=False)

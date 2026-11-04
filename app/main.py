@@ -96,8 +96,19 @@ def capture_auth():
     return out
 
 
+def reboot_hosts():
+    """{wan: modem host} from each WAN's capture pages ({NAME_GATEWAY} placeholder), for the Device -> Restart reboot."""
+    out = {}
+    for k in config.WAN_KEYS:
+        m = config.PLACEHOLDER_RE.search(str(settings.get(f"capture_{k}") or ""))
+        host = config.gateway_value(m.group(1)) if m else None
+        if host:
+            out[k] = host
+    return out
+
+
 capturer = Capturer(os.path.join(DATA, "captures"), config.capture_urls(settings.data), capture_codes(),
-                    keep_days=cfg["capture_keep_days"], auth_by_wan=capture_auth())
+                    keep_days=cfg["capture_keep_days"], auth_by_wan=capture_auth(), reboot_hosts=reboot_hosts())
 # Port bounce: the watchdog's own SSH key, locked on the gateway to wan-bounce.sh (gateway/install-bounce.sh)
 bouncer = Bouncer(os.environ.get("BOUNCE_SSH_HOST", UNIFI_URL.split("//")[-1].split(":")[0].split("/")[0]),
                   os.environ.get("BOUNCE_SSH_KEY", os.path.join(DATA, "ssh", "id_ed25519")),
@@ -115,6 +126,7 @@ def apply_settings():
     capturer.urls_by_wan = config.capture_urls(settings.data)
     capturer.codes_by_wan = capture_codes()
     capturer.auth_by_wan = capture_auth()
+    capturer.reboot_hosts = reboot_hosts()
     capturer.keep_days = new_cfg["capture_keep_days"]
 
 app = Flask(__name__)
@@ -510,6 +522,17 @@ def capture_schedule():
         time.sleep(30)
 
 
+def box_reboot_schedule():
+    """Once a day, in the configured hour, reboot the chosen WAN's modem if its latency has crept up."""
+    time.sleep(90)
+    while True:
+        try:
+            monitor.box_reboot_tick(datetime.now())
+        except Exception as e:
+            events.add("error", None, f"Modem-reboot check failed: {e}")
+        time.sleep(30)
+
+
 @app.get("/healthz")
 def healthz():
     last = monitor.last_check
@@ -522,4 +545,5 @@ START = time.time()
 if __name__ == "__main__":
     monitor.start()
     threading.Thread(target=capture_schedule, daemon=True, name="capture-schedule").start()
+    threading.Thread(target=box_reboot_schedule, daemon=True, name="box-reboot").start()
     serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threads=4, ident="wan-watchdog")

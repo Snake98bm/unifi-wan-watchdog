@@ -27,6 +27,38 @@ LOGIN_FORM_RE = re.compile(r'action="(/cgi-bin/login\.ha)"', re.I)
 NONCE_RE = re.compile(r'name="nonce"\s+value="([^"]+)"', re.I)
 
 
+def reboot_modem(host, code, timeout=10):
+    """Reboot an AT&T/Arris modem through its Restart Device page: GET login.ha (sets the SessionID cookie),
+    read the access-code nonce from restart.ha, POST login.ha to authenticate (md5(code+nonce), like the box's
+    own page), then POST Restart to restart.ha. The box drops its web server as it reboots, so a connection
+    error on the final POST means the reboot started. Raises PermissionError (bad/missing code) or
+    RuntimeError (the expected page/button wasn't there, e.g. the firmware changed)."""
+    if not code:
+        raise PermissionError("needs the device access code")
+    base = f"http://{host}/cgi-bin/"
+    with requests.Session() as s:
+        s.verify = False
+        s.get(base + "login.ha", timeout=timeout)                       # sets the SessionID cookie
+        r = s.get(base + "restart.ha", timeout=timeout)                 # access-code form (nonce)
+        m = NONCE_RE.search(r.text)
+        if not m:
+            raise RuntimeError("restart page has no login form (cookies or firmware changed?)")
+        s.post(base + "login.ha", timeout=timeout, data={
+            "nonce": m.group(1), "password": "*" * len(code),
+            "hashpassword": hashlib.md5((code + m.group(1)).encode()).hexdigest(), "Continue": "Continue"})
+        r = s.get(base + "restart.ha", timeout=timeout)                 # authenticated restart page
+        if "Access Code Required" in r.text:
+            raise PermissionError("login failed - check the access code")
+        m = NONCE_RE.search(r.text)
+        if not m or 'name="Restart"' not in r.text:
+            raise RuntimeError("Restart button not found on the restart page (firmware changed?)")
+        try:
+            s.post(base + "restart.ha", timeout=timeout,
+                   data={"nonce": m.group(1), "Restart": "Restart"})    # triggers the reboot
+        except (requests.ConnectionError, requests.Timeout):
+            pass                                                        # box dropped as it rebooted: expected
+
+
 def schedule_slot(schedule, now, last_key):
     """Key of the scheduled-capture slot that is due at `now` (a datetime), or None.
     hourly: once per clock hour; daily: once a day from 23:55; anything else: never."""
@@ -53,14 +85,26 @@ class Capturer:
     auth_by_wan: (user, password) for modems behind an HTTP login (the RM520N-GL toolkit). Modem LAN pages use
     self-signed certificates, so certificates aren't verified."""
 
-    def __init__(self, base_dir, urls_by_wan, codes_by_wan=None, keep_days=45, timeout=10, auth_by_wan=None):
+    def __init__(self, base_dir, urls_by_wan, codes_by_wan=None, keep_days=45, timeout=10, auth_by_wan=None,
+                 reboot_hosts=None):
         self.base_dir, self.urls_by_wan, self.keep_days, self.timeout = base_dir, urls_by_wan, keep_days, timeout
         self.codes_by_wan = codes_by_wan or {}
         self.auth_by_wan = auth_by_wan or {}
+        self.reboot_hosts = reboot_hosts or {}   # {wan: modem host} for the Device -> Restart reboot
         os.makedirs(base_dir, exist_ok=True)
 
     def has(self, wan_key):
         return bool(self.urls_by_wan.get(wan_key))
+
+    def can_reboot(self, wan_key):
+        return bool(self.reboot_hosts.get(wan_key) and self.codes_by_wan.get(wan_key))
+
+    def reboot(self, wan_key):
+        """Reboot this WAN's modem (AT&T/Arris Device -> Restart). Raises if the host or access code is missing."""
+        host = self.reboot_hosts.get(wan_key)
+        if not host:
+            raise RuntimeError("no modem address to reboot for this WAN")
+        reboot_modem(host, self.codes_by_wan.get(wan_key), self.timeout)
 
 
     def _get(self, session, url, state, code):

@@ -975,6 +975,82 @@ class Monitor(threading.Thread):
             return None, "Refused, safety check failed: " + "; ".join(w.problems)
         return w, None
 
+    def reboot_box(self, wan_key, reason, manual=False):
+        """Reboot a WAN's modem through its own Device -> Restart page. Reserves the one-at-a-time slot first so
+        the watchdog doesn't also bounce/power-cycle while it reboots, then holds a recovery window until the WAN
+        comes back. Dry run only logs. Returns (ok, detail)."""
+        with self.lock:
+            try:
+                w = self._wan(wan_key)
+            except StopIteration:
+                return False, "unknown WAN"
+            if self.busy:
+                return False, f"{self._wan(self.busy['wan']).label} is being reset first"
+            now = self.clock()
+            self._reserve(w, "modem reboot", now)
+        if self.settings.get("dry_run") and not manual:
+            self.events.add("action", wan_key, f"DRY RUN: would reboot {w.label}'s modem (Device -> Restart) - {reason}")
+            with self.lock:
+                self.busy = None
+            return True, "dry run"
+        if not (self.capture and self.capture.can_reboot(wan_key)):
+            self.events.add("error", wan_key, f"Can't reboot {w.label}'s modem: no address or access code configured")
+            with self.lock:
+                self.busy = None
+            return False, "not configured"
+        error = None
+        try:
+            self.capture.reboot(wan_key)
+        except (PermissionError, RuntimeError) as e:
+            error = str(e)
+        except Exception as e:
+            error = f"{e.__class__.__name__}: {e}"
+        done = self.clock()
+        with self.lock:
+            if error:
+                self.events.add("error", wan_key, f"Couldn't reboot {w.label}'s modem: {error} - {reason}")
+                self.busy = None
+                return False, error
+            self.events.add("action", wan_key, f"Rebooted {w.label}'s modem (Device -> Restart) - {reason}")
+            w.down_since = w.private_since = None     # timers restart from the next check
+            self.busy = {"wan": w.key, "since": done, "what": "modem reboot",
+                         "until": done + self.cfg["recovery_minutes"] * 60}
+        return True, "reboot sent"
+
+    def box_reboot_tick(self, now_dt):
+        """Called about once a minute. Once a day, in the configured hour, reboot the chosen WAN's modem when its
+        last-hour average probe latency is at least the threshold (0 = always). Returns True if a reboot was sent."""
+        if not self.settings.get("box_reboot") or now_dt.hour != int(self.settings.get("box_reboot_hour") or 4):
+            return False
+        key = now_dt.strftime("%Y%m%d")
+        if self.settings.get("box_reboot_last") == key:
+            return False
+        wan = self.settings.get("box_reboot_wan") or "wan2"
+        try:
+            label = self._wan(wan).label
+        except StopIteration:
+            self.settings.set(box_reboot_last=key)
+            return False
+        thresh = int(self.settings.get("box_reboot_latency_ms") or 0)
+        avg = None
+        if thresh > 0:
+            if self.probe_history is None:
+                self.settings.set(box_reboot_last=key)
+                return False
+            _n, avg, _loss = self.probe_history.recent(wan, self.clock() - 3600)
+            if avg is None:
+                self.settings.set(box_reboot_last=key)
+                self.events.add("info", wan, f"{label} modem reboot skipped: no probe data to judge latency")
+                return False
+            if avg < thresh:
+                self.settings.set(box_reboot_last=key)
+                self.events.add("info", wan, f"{label} modem reboot skipped: latency OK ({avg:.0f} ms, under {thresh} ms)")
+                return False
+        self.settings.set(box_reboot_last=key)     # mark the day first: a failed reboot won't retry in a loop
+        reason = f"scheduled {now_dt.hour:02d}:00" + (f", last hour averaged {avg:.0f} ms" if avg is not None else "")
+        ok, _ = self.reboot_box(wan, reason)
+        return ok
+
     def manual_cycle(self, key):
         with self.lock:
             w, err = self._manual_guard(key)

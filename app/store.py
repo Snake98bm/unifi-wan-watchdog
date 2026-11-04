@@ -73,6 +73,15 @@ class Probes:
         if self.added % 2000 == 0:          # about once a day per WAN at one result every 30 s
             self.prune()
 
+    def recent(self, wan, since):
+        """(count, avg_ms, loss_pct) for this WAN since `since` (epoch). avg is over replies only, None if none."""
+        with self.lock, self._db() as db:
+            n, avg, sent, recv = db.execute(
+                "SELECT COUNT(*), AVG(CASE WHEN recv > 0 THEN avg_ms END), SUM(sent), SUM(recv) "
+                "FROM probes WHERE wan = ? AND ts >= ?", (wan, since)).fetchone()
+        loss = round(100 * (1 - (recv or 0) / sent), 1) if sent else None
+        return n or 0, (round(avg, 1) if avg is not None else None), loss
+
     def hourly(self, wan, since):
         """[{hour, checks, sent, recv, loss, avg_ms, worst_ms, failed}] newest first (hour = epoch of its start)."""
         sql = ("SELECT CAST(ts / 3600 AS INTEGER) * 3600 AS hour, COUNT(*), SUM(sent), SUM(recv), AVG(avg_ms), "
