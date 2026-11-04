@@ -277,6 +277,14 @@ def set_wan_enabled(key):
     return redirect(url_for("dashboard"))
 
 
+@app.post("/vpn/enabled")
+@login_required
+def set_vpn_enabled():
+    """Dashboard checkbox: turn watchdog watching/reconnecting of the VPN on or off (vpn_check)."""
+    save_settings({"vpn_check": request.form.get("enabled") == "on"}, partial=True)
+    return redirect(url_for("dashboard"))
+
+
 @app.route("/settings/all", methods=["GET", "POST"])
 @login_required
 def all_settings():

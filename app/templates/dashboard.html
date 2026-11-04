@@ -71,9 +71,14 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
     {% endif %}
   </div>
 {% endfor %}
-{% if s.vpn.watched %}{% set v = s.vpn %}
+{% if s.vpn.configured %}{% set v = s.vpn %}
   <div class="card">
-    <h2><span>{{ v.label }} <span class="wan-name">VPN</span></span> <span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(v.state, 'unknown') }}">{{ v.state }}</span></h2>
+    <h2><span>{{ v.label }} <span class="wan-name">VPN</span></span> <span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(v.state, 'unknown') }}">{{ v.state }}</span>{% if not s.settings.vpn_check %} <span class="pill" style="background: var(--warn);">disabled</span>{% endif %}</h2>
+    <form method="post" action="{{ url_for('set_vpn_enabled') }}" style="margin: 2px 0 6px;">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <label><input type="checkbox" name="enabled" {{ "checked" if s.settings.vpn_check }} onchange="this.form.submit()"> Watch and reconnect the VPN</label>
+    </form>
+    {% if not s.settings.vpn_check %}<p class="note" style="color: var(--warn);">Not watched &mdash; shown for reference, but the watchdog won't reconnect it or alert.</p>{% endif %}
     <dl>
       <dt>Exit IP</dt><dd>{{ v.exit_ip or "?" }}</dd>
       <dt>Internet</dt><dd>{% if v.verdict == "ok" %}<span class="good">OK</span>{% elif v.verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif v.verdict == "banned" %}<span class="bad">BANNED</span>{% elif v.verdict == "leak" %}<span class="bad">NOT THROUGH THE VPN</span>{% else %}{{ v.verdict }}{% endif %}

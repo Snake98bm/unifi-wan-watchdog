@@ -1101,7 +1101,8 @@ class Monitor(threading.Thread):
                     "settings": dict(self.settings.data), "cfg": self.cfg, "gw_version": self.gw_version,
                     "bounce": dict(self.bounce_access, configured=bool(self.bouncer and self.bouncer.configured())),
                     "vpn": dict(self.vpn.as_dict(now), label=self.vpn_label, iface=self.settings.get("vpn_iface"),
-                                watched=bool(self.probe_dir and self.settings.get("vpn_check"))),
+                                watched=bool(self.probe_dir and self.settings.get("vpn_check")),
+                                configured=bool(self.probe_dir and self.settings.get("vpn_iface"))),
                     "capture_keys": [w.key for w in self.wans if self.capture and self.capture.has(w.key)],
                     "box_reboot": self._box_reboot_status(now)}
 
