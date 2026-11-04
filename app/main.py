@@ -267,6 +267,16 @@ def update_settings():
     return redirect(url_for("dashboard"))
 
 
+@app.post("/wan/<key>/enabled")
+@login_required
+def set_wan_enabled(key):
+    """Dashboard checkbox: turn watchdog management of one WAN on or off."""
+    if key not in config.WAN_KEYS:
+        abort(404)
+    save_settings({f"{key}_enabled": request.form.get("enabled") == "on"}, partial=True)
+    return redirect(url_for("dashboard"))
+
+
 @app.route("/settings/all", methods=["GET", "POST"])
 @login_required
 def all_settings():

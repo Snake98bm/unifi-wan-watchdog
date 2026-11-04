@@ -664,6 +664,10 @@ class Monitor(threading.Thread):
             self.events.add("info", w.key, f"{w.label}'s port safety checks pass again")
             w.problems_logged = None
 
+        if not self._enabled(w.key):
+            w.down_since = w.private_since = None
+            w.bad_checks = 0
+            return                                      # disabled: shown, but not watched for action or alerts
         if w.state in ("down", "offline"):
             w.down_since = w.down_since or now
         else:
@@ -801,6 +805,9 @@ class Monitor(threading.Thread):
         """Pick the one action to run now and reserve the slot for it. Returns (wan, step, reason) or None."""
         due = []
         for w in self.wans:  # self.wans is already in priority order (AT&T first)
+            if not self._enabled(w.key):
+                w.note = "not managed (disabled on the Settings page)"
+                continue
             step, why = self._next_step(w, now)
             w.note = f"needs a {'port bounce' if step == 'bounce' else 'power cycle'}: {why}" if step else why
             if step and w.problems:
@@ -953,6 +960,10 @@ class Monitor(threading.Thread):
     def _wan(self, key):
         return next(w for w in self.wans if w.key == key)
 
+    def _enabled(self, key):
+        """A WAN the watchdog manages. Only an explicit False disables it (missing/True = enabled)."""
+        return self.settings.get(f"{key}_enabled") is not False
+
     @staticmethod
     def _roll_day(w):
         today = date.today().isoformat()
@@ -1083,7 +1094,8 @@ class Monitor(threading.Thread):
                 busy = dict(self.busy, label=self._wan(self.busy["wan"]).label,
                             left=max(0, int(self.busy["until"] - now)))
             # pages list the WANs by number (WAN 1, WAN 2); self.wans stays in reset-priority order
-            return {"wans": [w.as_dict(now) for w in sorted(self.wans, key=lambda w: w.key)], "busy": busy,
+            return {"wans": [dict(w.as_dict(now), enabled=self._enabled(w.key))
+                             for w in sorted(self.wans, key=lambda w: w.key)], "busy": busy,
                     "first_label": self.wans[0].label if self.wans else "",
                     "last_check": self.last_check, "last_error": self.last_error, "now": now,
                     "settings": dict(self.settings.data), "cfg": self.cfg, "gw_version": self.gw_version,

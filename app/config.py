@@ -76,6 +76,10 @@ FIELDS = {
                               "Average internet-probe latency over the hour before. 0 = reboot every day regardless "
                               "of latency."),
     "wan1_label": ("WANs", "WAN 1 name", "text", "Verizon", None, None, ""),
+    "wan1_enabled": ("WANs", "WAN 1 enabled", "bool", True, None, None,
+                     "Off = the watchdog still shows this WAN but never acts on it or alerts: no down timer, no "
+                     "bounce or power cycle, no down/offline log entries. Use it for a WAN that is unplugged or "
+                     "being worked on. The Bounce / Power-cycle buttons still work by hand."),
     "wan1_port": ("WANs", "WAN 1 gateway port", "int", 8, 1, 11, "Port number on the UniFi gateway (the WAN cable's port)."),
     "capture_wan1": ("WANs", "WAN 1 modem pages to save", "urls",
                      "\n".join("at:" + c for c in ('AT+QENG="servingcell"', "AT+QCAINFO", "AT+QTEMP", "AT+QNWINFO",
@@ -88,6 +92,10 @@ FIELDS = {
                     "https://{QUECTEL_GATEWAY}/cgi-bin/get_atcommand?atcmd={AT}", None, None,
                     "{AT} is replaced by the command. RM520N-GL toolkit (SimpleAdmin)."),
     "wan2_label": ("WANs", "WAN 2 name", "text", "AT&T", None, None, ""),
+    "wan2_enabled": ("WANs", "WAN 2 enabled", "bool", True, None, None,
+                     "Off = the watchdog still shows this WAN but never acts on it or alerts: no down timer, no "
+                     "bounce or power cycle, no down/offline log entries. Use it for a WAN that is unplugged or "
+                     "being worked on. The Bounce / Power-cycle buttons still work by hand."),
     "wan2_port": ("WANs", "WAN 2 gateway port", "int", 1, 1, 11, "Port number on the UniFi gateway (the WAN cable's port)."),
     "capture_wan2": ("WANs", "WAN 2 modem pages to save", "urls",
                      "\n".join("http://{ATT_GATEWAY}/cgi-bin/" + p + ".ha" for p in

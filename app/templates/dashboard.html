@@ -19,7 +19,12 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
 <div class="cards">
 {% for w in s.wans %}
   <div class="card">
-    <h2><span>{{ w.label }} <span class="wan-name">{{ w.name }}</span></span> <span class="pill {{ w.state }}">{{ w.state }}</span></h2>
+    <h2><span>{{ w.label }} <span class="wan-name">{{ w.name }}</span></span> <span class="pill {{ w.state }}">{{ w.state }}</span>{% if not w.enabled %} <span class="pill" style="background: var(--warn);">disabled</span>{% endif %}</h2>
+    <form method="post" action="{{ url_for('set_wan_enabled', key=w.key) }}" style="margin: 2px 0 6px;">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <label><input type="checkbox" name="enabled" {{ "checked" if w.enabled }} onchange="this.form.submit()"> Watchdog manages this WAN</label>
+    </form>
+    {% if not w.enabled %}<p class="note" style="color: var(--warn);">Not managed &mdash; shown for reference, but the watchdog won't act on it or alert.</p>{% endif %}
     <dl>
       <dt>IP</dt><dd>{{ w.ip or "none" }}</dd>
       <dt>Gateway port</dt><dd>{{ w.port }}{% if w.ifname %} ({{ w.ifname }}){% endif %} &middot; link {{ "up" if w.link else ("down" if w.link is not none else "?") }}</dd>
