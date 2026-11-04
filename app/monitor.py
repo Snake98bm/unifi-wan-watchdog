@@ -210,6 +210,7 @@ class Monitor(threading.Thread):
         self.gw_version = None
         self.last_check = None
         self.last_error = None
+        self._outage = None       # {"since", "version", "ids"} while the gateway API can't be read
         self.bounce_access = {"ok": None, "checked": None, "detail": "not checked yet", "lost": False}
         self.async_captures = True
         self._waiting_logged = None
@@ -233,17 +234,23 @@ class Monitor(threading.Thread):
         self._stop.set()
 
     def _error(self, msg):
+        """Log an error once (repeats are dropped); returns the event's row id, or None if not logged."""
         with self.lock:
-            if msg != self.last_error:
-                self.events.add("error", None, msg)
+            rowid = self.events.add("error", None, msg) if msg != self.last_error else None
             self.last_error = msg
+            return rowid
 
     # ---------- one check ----------
     def check(self):
         try:
             gw = self.client.gateway()
         except UniFiError as e:
-            self._error(f"Can't read the gateway: {e} (no action taken)")
+            rowid = self._error(f"Can't read the gateway: {e} (no action taken)")
+            with self.lock:
+                if self._outage is None:
+                    self._outage = {"since": self.clock(), "ids": [],
+                                    "version": self.gw_version or self.settings.get("gw_firmware")}
+                self._outage["ids"].append(rowid)
             return
         now = self.clock()
         self._watch_firmware(gw.get("version"), now)          # may SSH: done before taking the lock
@@ -253,6 +260,7 @@ class Monitor(threading.Thread):
             if self.last_error:
                 self.events.add("info", None, "Gateway API reachable again")
             self.last_error = None
+            self._explain_outage(gw.get("version"), now)
             self.last_check = now
             self.gw_mac = gw.get("mac")
             ports = {p.get("port_idx"): p for p in gw.get("port_table", [])}
@@ -273,6 +281,21 @@ class Monitor(threading.Thread):
         if vpn_plan:
             self._vpn_restart(vpn_plan, now, manual=False)
         self._sync_vpn_conf()
+
+    def _explain_outage(self, version, now):
+        """The API just came back. If the firmware changed meanwhile, the outage was the gateway installing
+        it: say so, and turn the errors logged during it into warnings so the night doesn't read as a fault."""
+        outage, self._outage = self._outage, None
+        if not outage or not outage["version"] or not version or version == outage["version"]:
+            return
+        ids = [r for r in outage["ids"] if r]
+        self.events.set_level(ids, "warn")
+        hm = lambda t: time.strftime("%H:%M:%S", time.localtime(t))  # noqa: E731
+        mins = max(1, round((now - outage["since"]) / 60))
+        self.events.add("info", None, f"The gateway was rebooting for a firmware upgrade {outage['version']} -> "
+                                      f"{version}: API unreachable for about {mins} min ({hm(outage['since'])} "
+                                      f"to {hm(now)}). The {len(ids)} error(s) logged meanwhile were the upgrade, "
+                                      f"not a fault, and are now marked warn")
 
     # ---------- bounce access / firmware survival ----------
     def _watch_firmware(self, version, now):

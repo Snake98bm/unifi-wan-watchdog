@@ -22,7 +22,15 @@ class Events:
         ts = time.time()
         print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))} [{level}] {message}", flush=True)
         with self.lock, self._db() as db:
-            db.execute("INSERT INTO events VALUES (?, ?, ?, ?)", (ts, level, wan, message))
+            return db.execute("INSERT INTO events VALUES (?, ?, ?, ?)", (ts, level, wan, message)).lastrowid
+
+    def set_level(self, rowids, level):
+        """Re-label events already logged (e.g. errors that turned out to be a firmware upgrade)."""
+        rowids = [r for r in rowids if r]
+        if not rowids:
+            return
+        with self.lock, self._db() as db:
+            db.executemany("UPDATE events SET level = ? WHERE rowid = ?", [(level, r) for r in rowids])
 
     def recent(self, limit=500, wan=None, level=None):
         sql, args = "SELECT ts, level, wan, message FROM events WHERE 1=1", []

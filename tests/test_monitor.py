@@ -332,6 +332,41 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(any("was LOST" in e["message"] for e in self.events.recent()))
         self.assertFalse(self.mon.bounce_access["ok"])
 
+    def _gateway_outage(self, minutes, new_version=None):
+        from unifi import UniFiError
+        real = self.gw.gateway
+        msgs = iter(["HTTP 502", "Connection refused", "timed out", "Connection refused", "not JSON"])
+
+        def down():
+            raise UniFiError("GET /stat/device: " + next(msgs, "not JSON"))
+        self.gw.gateway = down
+        self.clock.run(self.mon, minutes)
+        self.gw.gateway = real
+        if new_version:
+            self.gw.version = new_version
+        self.clock.run(self.mon, 0.5)
+
+    def test_firmware_upgrade_outage_relabeled(self):
+        self._gateway_outage(12, new_version="5.1.35")
+        log = self.events.recent()
+        self.assertEqual([e for e in log if e["level"] == "error"], [])          # no red rows left
+        gw_errs = [e for e in log if e["message"].startswith("Can't read the gateway")]
+        self.assertEqual((len(gw_errs), {e["level"] for e in gw_errs}), (5, {"warn"}))
+        summary = [e for e in log if "rebooting for a firmware upgrade 5.1.34 -> 5.1.35" in e["message"]]
+        self.assertEqual(len(summary), 1)
+        self.assertIn("about 12 min", summary[0]["message"])
+        self.assertIn("The 5 error(s)", summary[0]["message"])
+        self.assertIsNone(self.mon._outage)
+
+    def test_outage_without_upgrade_stays_error(self):
+        self._gateway_outage(3)
+        log = self.events.recent()
+        self.assertEqual(len([e for e in log if e["level"] == "error"]), 5)
+        self.assertFalse(any("firmware upgrade" in e["message"] for e in log))
+        self.gw.version = "5.1.35"                    # a later upgrade with no outage doesn't touch them
+        self.mon.check()
+        self.assertEqual(len([e for e in self.events.recent() if e["level"] == "error"]), 5)
+
     def test_bounce_access_checked_at_startup_only(self):
         self.with_bouncer()
         self.assertEqual(self.bouncer.checks, 1)              # at startup
