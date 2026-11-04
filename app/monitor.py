@@ -1037,6 +1037,8 @@ class Monitor(threading.Thread):
         if self.settings.get("box_reboot_last") == key:
             return False
         wan = self.settings.get("box_reboot_wan") or "wan2"
+        if not self._enabled(wan):
+            return False                          # a WAN turned off on the dashboard is left alone, modem too
         try:
             label = self._wan(wan).label
         except StopIteration:
@@ -1120,5 +1122,5 @@ class Monitor(threading.Thread):
             _n, recent, _loss = self.probe_history.recent(wan, now - 3600)
         return {"on": True, "wan": wan, "label": label, "hour": int(self.settings.get("box_reboot_hour") or 4),
                 "threshold": int(self.settings.get("box_reboot_latency_ms") or 0), "recent_ms": recent,
-                "last": self.settings.get("box_reboot_last"),
+                "last": self.settings.get("box_reboot_last"), "wan_enabled": self._enabled(wan),
                 "can": bool(self.capture and self.capture.can_reboot(wan))}

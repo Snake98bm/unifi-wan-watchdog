@@ -620,6 +620,15 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(mon.box_reboot_tick(at4))              # same day: not twice
         self.assertEqual(cap.reboots, ["wan2"])
 
+    def test_box_reboot_skips_a_disabled_wan(self):
+        import datetime
+        self.settings.set(box_reboot=True, box_reboot_wan="wan2", box_reboot_hour=4, box_reboot_latency_ms=0,
+                          wan2_enabled=False)
+        mon, cap = self._reboot_mon(avg=200)
+        self.assertFalse(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 4, 0)))
+        self.assertEqual(cap.reboots, [])                 # disabled WAN -> modem left alone
+        self.assertEqual(mon.snapshot()["box_reboot"]["wan_enabled"], False)
+
     def test_box_reboot_tick_low_latency_skips(self):
         import datetime
         self.settings.set(box_reboot=True, box_reboot_hour=4, box_reboot_latency_ms=90)
