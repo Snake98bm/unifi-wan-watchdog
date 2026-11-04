@@ -56,6 +56,9 @@ class FakeRebootCapture:
     def __init__(self, ok=True):
         self.ok, self.reboots = ok, []
 
+    def has(self, key):
+        return False
+
     def can_reboot(self, key):
         return True
 
@@ -640,6 +643,16 @@ class MonitorTests(unittest.TestCase):
         mon, cap = self._reboot_mon(avg=None)                  # no probe data needed when threshold is 0
         self.assertTrue(mon.box_reboot_tick(datetime.datetime(2026, 11, 5, 3, 0)))
         self.assertEqual(cap.reboots, ["wan2"])
+
+    def test_snapshot_shows_box_reboot_watching(self):
+        self.settings.set(box_reboot=True, box_reboot_wan="wan2", box_reboot_hour=4, box_reboot_latency_ms=90)
+        mon, _ = self._reboot_mon(avg=120)
+        st = mon.snapshot()["box_reboot"]
+        self.assertEqual((st["on"], st["wan"], st["hour"], st["threshold"], st["recent_ms"], st["can"]),
+                         (True, "wan2", 4, 90, 120, True))
+
+    def test_snapshot_box_reboot_off_by_default(self):
+        self.assertEqual(self.mon.snapshot()["box_reboot"], {"on": False})
 
     def test_automation_off_only_watches(self):
         self.settings.set(enabled=False)

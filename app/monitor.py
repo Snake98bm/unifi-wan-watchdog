@@ -1090,4 +1090,22 @@ class Monitor(threading.Thread):
                     "bounce": dict(self.bounce_access, configured=bool(self.bouncer and self.bouncer.configured())),
                     "vpn": dict(self.vpn.as_dict(now), label=self.vpn_label, iface=self.settings.get("vpn_iface"),
                                 watched=bool(self.probe_dir and self.settings.get("vpn_check"))),
-                    "capture_keys": [w.key for w in self.wans if self.capture and self.capture.has(w.key)]}
+                    "capture_keys": [w.key for w in self.wans if self.capture and self.capture.has(w.key)],
+                    "box_reboot": self._box_reboot_status(now)}
+
+    def _box_reboot_status(self, now):
+        """What the scheduled modem reboot is watching, for the dashboard (call with the lock held)."""
+        if not self.settings.get("box_reboot"):
+            return {"on": False}
+        wan = self.settings.get("box_reboot_wan") or "wan2"
+        try:
+            label = self._wan(wan).label
+        except StopIteration:
+            label = wan
+        recent = None
+        if self.probe_history is not None:
+            _n, recent, _loss = self.probe_history.recent(wan, now - 3600)
+        return {"on": True, "wan": wan, "label": label, "hour": int(self.settings.get("box_reboot_hour") or 4),
+                "threshold": int(self.settings.get("box_reboot_latency_ms") or 0), "recent_ms": recent,
+                "last": self.settings.get("box_reboot_last"),
+                "can": bool(self.capture and self.capture.can_reboot(wan))}
