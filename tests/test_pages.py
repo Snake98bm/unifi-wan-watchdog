@@ -82,5 +82,57 @@ class ScheduleTests(unittest.TestCase):
         self.assertIsNone(schedule_slot("off", t, None))
 
 
+def dsl_page(s1, s2, ds=(0, 60029), us=(0, 11138), dmax=(0, 64944), umax=(0, 12043), fec=(0, 0, 5400, 1),
+             crc=(0, 0, 3, 0)):
+    """Trimmed AT&T/Arris Broadband Status page: the bonded "DSL Status" table, as the box draws it (the error
+    rows have a Downstream and an Upstream column per line)."""
+    def row(label, v):
+        return f'<tr><th scope="row">{label}</th>' + "".join(f'<td colspan="2">{x}</td>' for x in v) + "</tr>"
+
+    def row4(label, v):
+        return f'<tr><th scope="row">{label}</th>' + "".join(f"<td>{x}</td>" for x in v) + "</tr>"
+    return f'''<div class="section-header"><h2>DSL Status</h2></div>
+    <table class="grid table100" summary="Table of Bonded DSL">
+    <tr><th scope="col" id="spacer">&nbsp;</th>
+    <th colspan="2" scope="col" id="Line1">Line 1</th><th colspan="2" scope="col" id="Line2">Line 2</th></tr>
+    <tr class="a"><th scope="row" id="LineState">Line State</th>
+      <td class="col2" colspan="2" headers="Line1 LineState">{s1}</td><td class="col2" colspan="2" headers="Line2 LineState">{s2}</td></tr>
+    {row("Downstream Sync Rate (kbps)", ds)}{row("Upstream Sync Rate (kbps)", us)}
+    {row("Downstream Max Attainable Rate (kbps)", dmax)}{row("Upstream Max Attainable Rate (kbps)", umax)}
+    {row("Modulation", ("Unknown", "VDSL2"))}
+    <tr><th>&nbsp;</th><th>Downstream</th><th>Upstream</th><th>Downstream</th><th>Upstream</th></tr>
+    {row4("SN Margin (dB)", (0, 0, 9.3, 6.0))}{row4("FEC Errors", fec)}{row4("CRC Errors", crc)}
+    </table>'''
+
+
+SYSINFO = '''<table class="table100"><tr><th scope="row">Time Since Last Reboot</th>
+<td class="col2">01:19:49:53</td></tr></table><div id="help"><strong>Time Since Last Reboot:</strong>
+Days:Hours:Minutes:Seconds since the device was restarted.</div>'''
+
+
+class DslTests(unittest.TestCase):
+    def test_reads_both_lines(self):
+        lines = pages.dsl_lines(dsl_page("Down", "Up"))
+        self.assertEqual(lines, [
+            {"line": "Line 1", "state": "Down", "down": 0, "up": 0, "ds_max": 0, "us_max": 0, "fec": [0, 0],
+             "crc": [0, 0]},
+            {"line": "Line 2", "state": "Up", "down": 60029, "up": 11138, "ds_max": 64944, "us_max": 12043,
+             "fec": [5400, 1], "crc": [3, 0]}])
+
+    def test_degraded_only_when_another_line_is_up(self):
+        self.assertEqual(pages.dsl_degraded(pages.dsl_lines(dsl_page("Down", "Up"))), ["Line 1"])
+        self.assertEqual(pages.dsl_degraded(pages.dsl_lines(dsl_page("Up", "TRAINING"))), ["Line 2"])
+        self.assertEqual(pages.dsl_degraded(pages.dsl_lines(dsl_page("Up", "Up"))), [])
+        self.assertEqual(pages.dsl_degraded(pages.dsl_lines(dsl_page("Down", "TRAINING"))), [])   # WAN down/reboot
+
+    def test_other_pages_have_no_lines(self):
+        self.assertEqual(pages.dsl_lines("<table><tr><td>Line State</td><td>Up</td></tr></table>"), [])
+        self.assertEqual(pages.dsl_lines(""), [])
+
+    def test_box_uptime(self):
+        self.assertEqual(pages.box_uptime(SYSINFO), ((1 * 24 + 19) * 60 + 49) * 60 + 53)
+        self.assertIsNone(pages.box_uptime("<h1>Access Code Required</h1>"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

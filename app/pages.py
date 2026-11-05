@@ -212,3 +212,55 @@ def history(pages):
                         sec["labels"].append(label)
                     sec["rows"][label][i] = v
     return [sections[t] for t in order], columns
+
+
+def dsl_lines(raw):
+    """The bonded-DSL lines on an AT&T/Arris Broadband Status page ("DSL Status": a Line 1, Line 2, ... column
+    each): [{"line": "Line 1", "state": "Up", "down"/"up": sync kbps, "ds_max"/"us_max": max attainable kbps,
+    "fec"/"crc": [downstream, upstream] error counts since the line trained}], or [] when there is no such table."""
+    def num(v):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return None
+    for t in tables(raw or ""):
+        names = [h for h in (t["header"] or [])[1:] if re.match(r"(?i)^line\s*\d+$", h)]
+        if len(names) < 2:
+            continue
+        rows = {r[0].lower(): r[1:] for r in t["rows"] if r}
+        states = rows.get("line state")
+        if not states:
+            continue
+        n = len(names)
+
+        def per_line(label, i):
+            v = rows.get(label) or []
+            return num(v[i]) if i < len(v) else None
+
+        def per_dir(label, i):          # the error rows have a Downstream and an Upstream column per line
+            v = rows.get(label) or []
+            return [num(v[2 * i]), num(v[2 * i + 1])] if len(v) >= 2 * n else None
+        return [{"line": name, "state": states[i] if i < len(states) else "",
+                 "down": per_line("downstream sync rate (kbps)", i), "up": per_line("upstream sync rate (kbps)", i),
+                 "ds_max": per_line("downstream max attainable rate (kbps)", i),
+                 "us_max": per_line("upstream max attainable rate (kbps)", i),
+                 "fec": per_dir("fec errors", i), "crc": per_dir("crc errors", i)}
+                for i, name in enumerate(names)]
+    return []
+
+
+def box_uptime(raw):
+    """Seconds since the AT&T/Arris box last rebooted, from its System Information page
+    ("Time Since Last Reboot" = days:hours:minutes:seconds), or None."""
+    m = re.search(r"(?is)Time Since Last Reboot.{0,200}?(\d+):(\d\d):(\d\d):(\d\d)", raw or "")
+    if not m:
+        return None
+    d, h, mi, s = (int(x) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + s
+
+
+def dsl_degraded(lines):
+    """Names of the lines that are not Up while at least one other line is (a bonded pair down, the WAN still
+    up). All lines down is just the WAN being down, which the watchdog already handles."""
+    down = [ln["line"] for ln in lines if ln["state"].strip().lower() != "up"]
+    return down if down and len(down) < len(lines) else []

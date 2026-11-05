@@ -40,6 +40,12 @@ why the line went down.
     put `{AT}` in the AT-command URL.)
   - the gateway's own syslog lines for that WAN port.
 
+  **Bonded DSL checks** (AT&T, from the saved Broadband Status and System Information pages), shown on the WAN's
+  dashboard card and logged once when they start and when they clear: a pair down while the other carries the
+  line; total sync or a pair's max attainable down more than 10% since the box's last reboot; a pair whose max
+  attainable after a reboot is under 60/10 Mbps; FEC or CRC errors in the last hour well above the pair's 7-day
+  average. The limits are on the Settings page (DSL).
+
   Shown in the modem's own table style, by date, or merged over the last 30 days.
 - **Web UI** with a password: status, confirmation pop-ups, event log, settings (saved in `/data`, applied
   live), diagnostics.

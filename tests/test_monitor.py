@@ -694,5 +694,128 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.gw.cycles, [])
 
 
+class FakeDslCapture:
+    """Saves AT&T broadband pages: each call saves the next page from `states` ((s1, s2) or (s1, s2, page
+    keyword arguments)), one save per call. With `boot` set, a System Information page gives the box's uptime."""
+    def __init__(self, clock, states=(), boot=None):
+        from test_pages import dsl_page
+        self.clock, self.page, self.saved, self.queue, self.boot = clock, dsl_page, {}, list(states), boot
+
+    def add(self, s1, s2, ts, page=None):
+        name = f"{int(ts):010d}-wan2"
+        up = int(ts - self.boot) if self.boot is not None else None
+        info = (f"<table><tr><th>Time Since Last Reboot</th><td>{up // 86400:02d}:{up // 3600 % 24:02d}:"
+                f"{up // 60 % 60:02d}:{up % 60:02d}</td></tr></table>") if up is not None else ""
+        self.saved[name] = (self.page(s1, s2, **(page or {})), ts, info)
+        return name
+
+    def has(self, key):
+        return key == "wan2"
+
+    def __call__(self, key, reason="", extra=None):
+        s1, s2, *page = self.queue.pop(0)
+        return self.add(s1, s2, self.clock(), *page), 3, []
+
+    def list(self, key=None, day=None):
+        return sorted(self.saved, reverse=True) if key in (None, "wan2") else []
+
+    def pages(self, name):
+        return [("home.ha", None), ("broadbandstatistics.ha", None), ("sysinfo.ha", None)]
+
+    def raw(self, name, page):
+        return {"broadbandstatistics.ha": self.saved[name][0], "sysinfo.ha": self.saved[name][2]}.get(page, "")
+
+    def meta(self, name):
+        return {"time": self.saved[name][1]}
+
+
+class DslWatchTests(unittest.TestCase):
+    setUp = MonitorTests.setUp
+
+    def dsl_msgs(self):
+        return [e["message"] for e in self.events.recent() if "bonded DSL" in e["message"]]
+
+    def save(self, cap, minutes=0):
+        self.clock.t += minutes * 60
+        self.mon.save_pages(self.mon._wan("wan2"), "(test)", quiet=True)
+
+    def test_pair_down_is_shown_then_logged_once_confirmed_then_recovery(self):
+        cap = FakeDslCapture(self.clock, [("Down", "Up"), ("Down", "Up"), ("Down", "Up"), ("Up", "Up")])
+        self.mon.capture = cap
+        self.save(cap)
+        d = self.mon._wan("wan2").dsl
+        self.assertEqual((d["down"], d["confirmed"]), (["Line 1"], False))   # on the card, not logged yet
+        self.assertEqual(self.dsl_msgs(), [])
+        self.save(cap, 60)
+        self.assertEqual(len(self.dsl_msgs()), 1)
+        self.assertIn("Line 1 is down since", self.dsl_msgs()[0])
+        self.assertIn("Line 2 only (60.0/11.1 Mbps)", self.dsl_msgs()[0])
+        self.save(cap, 60)
+        self.assertEqual(len(self.dsl_msgs()), 1)                          # not repeated
+        self.save(cap, 60)
+        self.assertIn("back to normal", self.dsl_msgs()[0])
+        self.assertEqual(self.mon._wan("wan2").dsl["down"], [])
+        snap = [w for w in self.mon.snapshot()["wans"] if w["key"] == "wan2"][0]
+        self.assertEqual(snap["dsl"]["age"], 0)
+
+    def test_retrain_blip_and_whole_line_down_are_not_logged(self):
+        cap = FakeDslCapture(self.clock, [("Down", "Up"), ("Down", "TRAINING"), ("Up", "Up")])
+        self.mon.capture = cap
+        self.save(cap)
+        self.save(cap, 1)                       # both down: the WAN's own problem, keeps "since"
+        self.assertEqual(self.mon._wan("wan2").dsl["down"], ["Line 1"])
+        self.save(cap, 1)
+        self.assertEqual(self.dsl_msgs(), [])
+
+    def test_start_reads_saved_history(self):
+        cap = FakeDslCapture(self.clock)
+        t0 = self.clock.t
+        cap.add("Up", "Up", t0 - 7200)
+        cap.add("Down", "Up", t0 - 3600)
+        cap.add("Down", "TRAINING", t0 - 1800)  # ignored
+        cap.add("Down", "Up", t0)
+        self.mon.capture = cap
+        self.mon.load_dsl()
+        d = self.mon._wan("wan2").dsl
+        self.assertEqual((d["down"], d["since"], d["confirmed"]), (["Line 1"], t0 - 3600, True))
+        self.assertEqual(len(self.dsl_msgs()), 1)
+        self.assertIsNone(self.mon._wan("wan1").dsl)
+
+
+class DslAlertTests(unittest.TestCase):
+    setUp = MonitorTests.setUp
+
+    def card(self):
+        return [w for w in self.mon.snapshot()["wans"] if w["key"] == "wan2"][0]["dsl"]
+
+    def test_attainable_drop_is_on_the_card_and_logged_then_clears(self):
+        boot = self.clock.t - 600
+        ok = ("Up", "Up", {"ds": (30000, 30000), "dmax": (67000, 65000), "umax": (12400, 12100)})
+        low = ("Up", "Up", {"ds": (30000, 30000), "dmax": (55000, 65000), "umax": (12400, 12100)})
+        cap = FakeDslCapture(self.clock, [ok, low, low, ok], boot=boot)
+        self.mon.capture = cap
+        wan = self.mon._wan("wan2")
+        self.mon.save_pages(wan, "(test)", quiet=True)
+        self.assertEqual(self.card()["alerts"], {})
+        for _ in range(2):
+            self.clock.t += 3600
+            self.mon.save_pages(wan, "(test)", quiet=True)
+        self.assertEqual(list(self.card()["alerts"]), ["att_Line 1_ds_max"])
+        msgs = [e["message"] for e in self.events.recent() if "max attainable" in e["message"]]
+        self.assertEqual(len(msgs), 1)                                    # logged once, not every save
+        self.assertIn("AT&T DSL Line 1 max attainable downstream down 18% since the reboot", msgs[0])
+        self.clock.t += 3600
+        self.mon.save_pages(wan, "(test)", quiet=True)
+        self.assertEqual(self.card()["alerts"], {})
+        self.assertTrue(self.events.recent()[0]["message"].startswith("Back to normal: AT&T DSL Line 1"))
+
+    def test_low_attainable_after_a_reboot(self):
+        cap = FakeDslCapture(self.clock, [("Up", "Up", {"dmax": (58000, 65000), "umax": (12400, 12100)})],
+                             boot=self.clock.t - 300)
+        self.mon.capture = cap
+        self.mon.save_pages(self.mon._wan("wan2"), "(test)", quiet=True)
+        self.assertIn("floor_Line 1", self.card()["alerts"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -50,6 +50,8 @@ from datetime import date
 from urllib.parse import urlparse
 
 from atparse import gateway_log_html, text_html
+from dsl import WEEK as DSL_WEEK, checks as dsl_checks, _same_boot as dsl_same_boot, _up as _dsl_up
+from pages import box_uptime, dsl_degraded, dsl_lines
 from unifi import UniFiError, is_private
 from version import VERSION
 
@@ -63,6 +65,16 @@ PROBE_FAILS_OFFLINE = 2           # probe results in a row with no reply at all 
 PROBE_STALE_SECONDS = 90          # an older probe result (or 3 probe intervals) is ignored
 VPN_KEY = "vpn"                   # the VPN probe writes probes/vpn.json; events and history use this key
 VPN_SETTLE_SECONDS = 15           # probe results from the first seconds after a reconnect are ignored
+DSL_CONFIRM_SECONDS = 300         # a bonded pair down in saves this far apart is logged (not a retrain blip)
+DSL_HISTORY_CAPTURES = 400        # at start, look back this many saves for when a pair went down
+
+
+def _name_time(name):
+    """A save's time from its folder name (YYYYMMDD-HHMMSS-wan, local time), for saves whose meta.json has none."""
+    try:
+        return time.mktime(time.strptime(str(name)[:15], "%Y%m%d-%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
 
 
 def mac_vendor(mac):
@@ -111,6 +123,10 @@ class Wan:
         self.probe_fails = 0
         self.wrong_path_logged = False
         self.stale_unifi = False          # UniFi says down but the probe proves the WAN works
+        # bonded DSL (AT&T): {"lines", "ts", "down": [line names down while another is up], "since", "confirmed",
+        # "alerts": {key: message}} for the dashboard, and the saves' samples for the checks (dsl.py)
+        self.dsl = None
+        self.dsl_samples = []
 
     @property
     def fingerprint(self):
@@ -151,6 +167,7 @@ class Wan:
             "port_network": self.port_network, "port_ifname": self.port_ifname, "is_uplink": self.is_uplink,
             "probe": self.probe, "probe_verdict": self.probe_verdict, "probe_note": self.probe_note,
             "probe_age": int(now - self.probe["ts"]) if self.probe and self.probe.get("ts") else None,
+            "dsl": dict(self.dsl, age=int(now - self.dsl["ts"]) if self.dsl.get("ts") else None) if self.dsl else None,
         }
 
 
@@ -223,6 +240,10 @@ class Monitor(threading.Thread):
     def run(self):
         self.events.add("info", None, "Watchdog v%s started (dry run: %s, automation: %s)" % (
             VERSION, self.settings.get("dry_run"), self.settings.get("enabled")))
+        try:
+            self.load_dsl()
+        except Exception as e:
+            self._error(f"reading the saved DSL line states failed: {e}")
         while not self._stop.is_set():
             try:
                 self.check()
@@ -860,7 +881,146 @@ class Monitor(threading.Thread):
             msg += " - not saved: " + "; ".join(errors)
         if errors or not quiet:
             self.events.add("warn" if errors else "info", w.key, msg)
+        if name:
+            self._check_dsl(w, name)
         return name
+
+    # ---------- bonded DSL (AT&T): a pair down, rates since the reboot, error counts ----------
+    def _dsl_sample(self, name):
+        """{"ts", "boot", "lines"} from a save's Broadband Status (+ System Information for the box's uptime), or
+        None when the save has no DSL table. Never raises."""
+        try:
+            keys = [k for k, _ in (self.capture.pages(name) or [])]
+            page = next((k for k in keys if "broadbandstatistics" in k), None)
+            if not page:
+                return None
+            lines = dsl_lines(self.capture.raw(name, page))
+            if not lines:
+                return None
+            ts = self.capture.meta(name).get("time") or _name_time(name)
+            if not ts:
+                return None
+            info = next((k for k in keys if "sysinfo" in k), None)
+            up = box_uptime(self.capture.raw(name, info)) if info else None
+            return {"ts": ts, "boot": ts - up if up is not None else None, "lines": lines}
+        except Exception:
+            return None
+
+    def _dsl_text(self, w, d):
+        up = [ln for ln in d["lines"] if ln["line"] not in d["down"]]
+        rate = sum(ln["down"] or 0 for ln in up), sum(ln["up"] or 0 for ln in up)
+        since = time.strftime("%Y-%m-%d %H:%M", time.localtime(d["since"])) if d.get("since") else "?"
+        return (f"{w.label} bonded DSL degraded: {' and '.join(d['down'])} "
+                f"{'is' if len(d['down']) == 1 else 'are'} down since {since}, running on "
+                f"{' and '.join(ln['line'] for ln in up)} only ({rate[0] / 1000:.1f}/{rate[1] / 1000:.1f} Mbps)")
+
+    def _setting(self, key, default):
+        v = self.settings.get(key)
+        return default if v is None else v
+
+    def _dsl_alerts(self, w):
+        """Run the rate/error checks on the WAN's samples; log what's new (warn) and what cleared (info)."""
+        found = dsl_checks(w.dsl_samples, w.label, drop_pct=self._setting("dsl_drop_pct", 10),
+                           min_down=self._setting("dsl_min_down_kbps", 60000),
+                           min_up=self._setting("dsl_min_up_kbps", 10000),
+                           error_factor=self._setting("dsl_error_factor", 3))
+        with self.lock:
+            old = (w.dsl or {}).get("alerts") or {}
+            if w.dsl is not None:
+                w.dsl["alerts"] = found
+        for key, msg in found.items():
+            if key not in old:
+                self.events.add("warn", w.key, msg)
+        for key, msg in old.items():
+            if key not in found:
+                self.events.add("info", w.key, "Back to normal: " + msg)
+
+    def _keep_samples(self, samples):
+        """The last 7 days of samples, plus every sample since the box's latest boot (the rate baseline)."""
+        if not samples:
+            return samples
+        cur = samples[-1]
+        return [s for s in samples if s["ts"] >= cur["ts"] - DSL_WEEK - 3600 or dsl_same_boot(s, cur)]
+
+    def load_dsl(self):
+        """At start: each WAN's DSL samples from its saves (the last 7 days, and back to the box's latest boot),
+        since when a pair has been down, and the current checks, so the dashboard shows them before the next
+        save. A pair already down in saves at least DSL_CONFIRM_SECONDS apart, and every check that fails now,
+        is logged once."""
+        if not (self.capture and hasattr(self.capture, "list")):
+            return
+        for w in self.wans:
+            try:
+                names = self.capture.list(w.key)[:DSL_HISTORY_CAPTURES]
+            except Exception:
+                continue
+            samples, d, walking = [], None, True
+            for name in names:                       # newest first
+                s = self._dsl_sample(name)
+                if s is None:
+                    continue
+                if samples and not walking and s["ts"] < samples[0]["ts"] - DSL_WEEK - 3600 \
+                        and not dsl_same_boot(s, samples[0]):
+                    break
+                samples.append(s)
+                down = dsl_degraded(s["lines"])
+                if not walking or (not down and not all(_dsl_up(ln) for ln in s["lines"])):
+                    continue                         # no line up (WAN down / retraining): says nothing
+                if d is None:
+                    d = {"lines": s["lines"], "ts": s["ts"], "down": down, "since": s["ts"] if down else None,
+                         "confirmed": False, "alerts": {}}
+                    walking = bool(down)
+                elif down == d["down"]:
+                    d["since"] = s["ts"]
+                else:
+                    walking = False
+            if not samples:
+                continue
+            if d is None:
+                d = {"lines": samples[0]["lines"], "ts": samples[0]["ts"], "down": [], "since": None,
+                     "confirmed": False, "alerts": {}}
+            if d["down"] and d["ts"] and d["since"] and d["ts"] - d["since"] >= DSL_CONFIRM_SECONDS:
+                d["confirmed"] = True
+                self.events.add("warn", w.key, self._dsl_text(w, d))
+            with self.lock:
+                w.dsl = d
+                w.dsl_samples = self._keep_samples(list(reversed(samples)))
+            self._dsl_alerts(w)
+
+    def _check_dsl(self, w, name):
+        """After a save: add the sample, update the pair states (logged when a pair is down in two saves at least
+        DSL_CONFIRM_SECONDS apart - a retrain after a reboot is shorter - and when all pairs are up again), then
+        run the rate/error checks."""
+        s = self._dsl_sample(name)
+        if s is None:
+            return
+        lines, ts = s["lines"], s["ts"]
+        down = dsl_degraded(lines)
+        all_up = all(_dsl_up(ln) for ln in lines)
+        newly = recovered = False
+        with self.lock:
+            w.dsl_samples = self._keep_samples(sorted(w.dsl_samples + [s], key=lambda x: x["ts"]))
+            prev = w.dsl or {}
+            alerts = prev.get("alerts") or {}
+            if not down and not all_up:          # no line up: the WAN is down or retraining - keep what we knew
+                w.dsl = dict(prev, lines=lines, ts=ts) if prev else {"lines": lines, "ts": ts, "down": [],
+                                                                     "since": None, "confirmed": False, "alerts": {}}
+            else:
+                same = bool(down) and prev.get("down") == down
+                d = {"lines": lines, "ts": ts, "down": down, "alerts": alerts,
+                     "since": prev.get("since") if same else (ts if down else None),
+                     "confirmed": bool(same and prev.get("confirmed"))}
+                newly = bool(down) and not d["confirmed"] and d["since"] is not None \
+                    and ts - d["since"] >= DSL_CONFIRM_SECONDS
+                d["confirmed"] = d["confirmed"] or newly
+                recovered = bool(prev.get("confirmed")) and all_up
+                w.dsl = d
+        if newly:
+            self.events.add("warn", w.key, self._dsl_text(w, w.dsl))
+        elif recovered:
+            states = ", ".join(f"{ln['line']} {ln['state']}" for ln in lines)
+            self.events.add("info", w.key, f"{w.label} bonded DSL back to normal: {states}")
+        self._dsl_alerts(w)
 
     def capture_async(self, w, why):
         """Save the modem's state in the background so the checks keep running (one at a time per WAN)."""

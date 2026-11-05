@@ -81,6 +81,18 @@ FIELDS = {
     "box_reboot_latency_ms": ("Modem reboot", "Only if the last hour averaged at least (ms)", "int", 90, 0, 2000,
                               "Average internet-probe latency over the hour before. 0 = reboot every day regardless "
                               "of latency."),
+    "dsl_drop_pct": ("DSL", "Flag a rate drop since the box's last reboot of more than (%)", "int", 10, 1, 90,
+                     "Read from the AT&T/Arris box's saved Broadband Status page. Total sync (all pairs that are up, "
+                     "added up) and each pair's max attainable are compared with the first save after the box's "
+                     "latest reboot. Also flagged: a pair down while the other is up."),
+    "dsl_min_down_kbps": ("DSL", "After a reboot, each pair's max attainable downstream at least (kbps)", "int", 60000,
+                          0, 1000000, "Checked on the first save after each reboot. 0 = no minimum."),
+    "dsl_min_up_kbps": ("DSL", "After a reboot, each pair's max attainable upstream at least (kbps)", "int", 10000,
+                        0, 1000000, "0 = no minimum."),
+    "dsl_error_factor": ("DSL", "Flag FEC/CRC errors above (x the 7-day average)", "int", 3, 2, 100,
+                         "A pair's FEC or CRC errors in the last hour, against its hourly average over the last 7 days "
+                         "of saves. At least 1000 FEC or 10 CRC errors an hour, so a near-zero average doesn't flag a "
+                         "few."),
     "wan1_label": ("WANs", "WAN 1 name", "text", "Verizon", None, None, ""),
     "wan1_enabled": ("WANs", "WAN 1 enabled", "bool", True, None, None,
                      "Off = the watchdog still shows this WAN but never acts on it or alerts: no down timer, no "
@@ -124,7 +136,7 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "Modem reboot", "WANs"]
+GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "Modem reboot", "DSL", "WANs"]
 WEB_URL_RE = re.compile(r"^https?://[^\s/]+(/\S*)?$")
 MAX_BAN_URLS = 4
 
