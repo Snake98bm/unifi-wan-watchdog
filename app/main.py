@@ -53,8 +53,9 @@ if settings.data.get("settings_version", 1) < 2:   # v2 added Verizon's (Quectel
     settings.data["settings_version"] = 2
 if settings.data.get("settings_version", 1) < 3:   # v3 added the toolkit's uptime and watchcat pages
     cur = str(settings.data.get("capture_wan1") or "")
-    if "{QUECTEL_GATEWAY}" in cur + str(settings.data.get("at_url_wan1") or "") and "get_uptime" not in cur:
-        settings.data["capture_wan1"] = "\n".join([cur.rstrip("\n")] + config.QUECTEL_PAGES)
+    if ("{QUECTEL_GATEWAY}" in cur + str(settings.data.get("at_url_wan1") or "") and "get_uptime" not in cur
+            and "/quecmanager/" not in cur):
+        settings.data["capture_wan1"] = "\n".join([cur.rstrip("\n")] + config.TOOLKIT_PAGES)
     settings.data["settings_version"] = 3
 if settings.data.get("settings_version", 1) < 4:   # v4 added the cause-code AT commands (CEER, CEREG, ...)
     cur = str(settings.data.get("capture_wan1") or "")
@@ -64,7 +65,16 @@ if settings.data.get("settings_version", 1) < 4:   # v4 added the cause-code AT 
         lines[at_end + 1:at_end + 1] = ["at:" + c for c in config.CAUSE_AT]   # after the other AT lines
         settings.data["capture_wan1"] = "\n".join(lines)
     settings.data["settings_version"] = 4
-settings.set()                                   # write any newly added settings to the file
+if settings.data.get("settings_version", 1) < 5:   # v5: the RM520N-GL's web UI is QManager, not the toolkit
+    cur = str(settings.data.get("capture_wan1") or "")
+    at = str(settings.data.get("at_url_wan1") or "")
+    if "/cgi-bin/get_atcommand" in at or any(p in cur for p in config.TOOLKIT_PAGES):
+        if "/cgi-bin/get_atcommand" in at:
+            settings.data["at_url_wan1"] = config.QUECTEL_AT_URL
+        lines = [ln for ln in cur.split("\n") if ln.strip() and ln.strip() not in config.TOOLKIT_PAGES]
+        settings.data["capture_wan1"] = "\n".join(lines + [p for p in config.QUECTEL_PAGES if p not in lines])
+    settings.data["settings_version"] = 5
+settings.set()                                  # write any newly added settings to the file
 cfg = config.monitor_cfg(settings.data)
 client = UniFi(UNIFI_URL, os.environ["UNIFI_API_KEY"], os.environ.get("UNIFI_SITE", "default"),
                os.environ.get("UNIFI_VERIFY_SSL", "false").lower() in ("1", "true", "yes"))
@@ -83,16 +93,16 @@ def capture_codes():
 
 
 def capture_auth():
-    """HTTP login for modem pages: QUECTEL_USER / QUECTEL_PASSWORD for the WAN whose pages use {QUECTEL_GATEWAY}
-    (the RM520N-GL toolkit), or <KEY>_USER / <KEY>_PASSWORD for any WAN."""
+    """Login for modem pages: QUECTEL_PASSWORD (QManager needs only the password; QUECTEL_USER is for older web
+    UIs behind HTTP Basic) for the WAN whose pages use {QUECTEL_GATEWAY}, or <KEY>_USER / <KEY>_PASSWORD."""
     out = {}
     for k in config.WAN_KEYS:
         user, pw = os.environ.get(f"{k.upper()}_USER"), os.environ.get(f"{k.upper()}_PASSWORD")
         uses = str(settings.get(f"capture_{k}") or "") + str(settings.get(f"at_url_{k}") or "")
-        if not user and "{QUECTEL_GATEWAY}" in uses:
+        if not (user or pw) and "{QUECTEL_GATEWAY}" in uses:
             user, pw = os.environ.get("QUECTEL_USER"), os.environ.get("QUECTEL_PASSWORD")
-        if user:
-            out[k] = (user, pw or "")
+        if user or pw:
+            out[k] = (user or "", pw or "")
     return out
 
 

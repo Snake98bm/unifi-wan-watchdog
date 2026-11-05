@@ -32,8 +32,12 @@ why the line went down.
 - **Modem logs:** saves modem pages before each power cycle, ~30 s after a WAN goes down, and hourly or daily:
   - **AT&T** gateways (BGW/NVG, `192.168.1.254`): status, broadband stats, logs; Syslog and Events with the
     device access code.
-  - **Quectel RM520N-GL** with the RMIITools toolkit web UI: AT commands (signal, cell, carrier aggregation,
-    temperatures, registration and reject causes, data session, IP passthrough) plus uptime.
+  - **Quectel RM520N-GL** with the [QManager](https://github.com/dr-dolomite/QManager-RM520N) web UI
+    (`QUECTEL_PASSWORD`): AT commands (signal, cell, carrier aggregation, temperatures, registration and reject
+    causes, data session, IP passthrough), QManager's status (uptime), network events, watchcat state and its
+    own log. Read-only: the watchdog logs in, reads, and logs out; a refused password isn't retried, so
+    QManager's login lockout never kicks in. (Older web UIs that take the AT command in the URL still work:
+    put `{AT}` in the AT-command URL.)
   - the gateway's own syslog lines for that WAN port.
 
   Shown in the modem's own table style, by date, or merged over the last 30 days.

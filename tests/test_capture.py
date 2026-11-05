@@ -33,8 +33,52 @@ class FakeBox(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode())
 
+    def _json(self, data, status=200, cookie=None):
+        import json
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def _qm_ok(self):
+        return f"qm_session={STATE['qm_token']}" in self.headers.get("Cookie", "") and STATE["qm_token"]
+
+    def qmanager(self, method):
+        """Fake QManager: JSON login -> qm_session cookie; everything else needs the cookie."""
+        import json
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) if method == "POST" else b""
+        path = self.path.split("/cgi-bin/quecmanager/", 1)[1]
+        if path == "auth/login.sh":
+            STATE["qm_logins"] += 1
+            if json.loads(body).get("password") != "qm-pw":
+                return self._json({"success": False, "error": "invalid_password", "attempts_remaining": 4})
+            STATE["qm_token"] = secrets.token_hex(32)
+            return self._json({"success": True}, cookie=f"qm_session={STATE['qm_token']}; HttpOnly; Path=/")
+        if not self._qm_ok():
+            return self._json({"success": False, "error": "unauthorized"}, 401)
+        if path == "auth/logout.sh":
+            STATE["qm_token"] = None
+            return self._json({"success": True})
+        if path == "at_cmd/send_command.sh":
+            cmd = json.loads(body)["command"]
+            STATE["at"].append(cmd)
+            if cmd == "AT+BAD":
+                return self._json({"success": False, "error": "command_failed", "command": cmd})
+            return self._json({"success": True, "command": cmd, "response": f"{cmd}\r\r\n+CSQ: 22,99\r\n\r\nOK\r"})
+        if path == "at_cmd/fetch_events.sh":
+            return self._json([{"timestamp": 1793900000, "type": "band_change", "message": "NR band n77 -> n2 <x>",
+                                "severity": "info"}])
+        if path.startswith("at_cmd/fetch_data.sh"):
+            return self._json({"device": {"uptime_seconds": 3600, "temperature": 41}, "lte": {"band": "B66"}})
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         sid = self._sid()
+        if "/cgi-bin/quecmanager/" in self.path:
+            return self.qmanager("GET")
         if self.path.startswith("/cgi-bin/get_atcommand"):   # Quectel toolkit: HTTP Basic login
             import base64
             if self.headers.get("Authorization") != "Basic " + base64.b64encode(b"admin:modem-pw").decode():
@@ -65,6 +109,8 @@ class FakeBox(http.server.BaseHTTPRequestHandler):
                           f'<input type="hidden" name="nonce" value="{STATE["nonce"]}" /></form>')
 
     def do_POST(self):
+        if "/cgi-bin/quecmanager/" in self.path:
+            return self.qmanager("POST")
         form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
         if self.path.endswith("restart.ha"):           # the reboot trigger
             if self._sid() in STATE["authed"] and form.get("Restart"):
@@ -89,7 +135,8 @@ class CaptureTests(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        STATE.update(nonce=None, sessions=set(), authed=set(), logins=0, at=[], rebooted=False)
+        STATE.update(nonce=None, sessions=set(), authed=set(), logins=0, at=[], rebooted=False, qm_logins=0,
+                     qm_token=None)
         self.dir = tempfile.mkdtemp()
 
     def host(self):
@@ -151,6 +198,50 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(saved, 1)                                   # just the gateway log
         self.assertIn("skipped the other 9", errors[-1])
         self.assertEqual([k for k, _ in Capturer(self.dir, {}).pages(name)], ["gateway_wan_log"])
+
+    def qm_items(self, at="at:AT+CSQ\nat:AT+QENG=\"servingcell\""):
+        import config
+        qm = self.base + "quecmanager/"
+        return config.capture_urls({"capture_wan1": f"{at}\n{qm}at_cmd/fetch_events.sh\n{qm}at_cmd/fetch_data.sh",
+                                    "at_url_wan1": qm + "at_cmd/send_command.sh"})["wan1"]
+
+    def test_qmanager_logs_in_runs_at_saves_pages_logs_out(self):
+        cap = Capturer(self.dir, {"wan1": self.qm_items()}, auth_by_wan={"wan1": ("", "qm-pw")})
+        name, saved, errors = cap("wan1")
+        self.assertEqual((saved, errors), (4, []))
+        self.assertEqual(STATE["qm_logins"], 1)                          # one login for the whole capture
+        self.assertEqual(STATE["at"], ["AT+CSQ", 'AT+QENG="servingcell"'])   # sent as JSON, not URL-encoded
+        self.assertIsNone(STATE["qm_token"])                             # logged out afterwards
+        files = dict(Capturer(self.dir, {}).files(name))
+        self.assertIn("RSSI (0-31) | 22", files["01-AT_CSQ"])
+        self.assertIn("NR band n77 -> n2 <x>", files["03-fetch_events.sh"])    # JSON with '<' still a table
+        self.assertIn("device.uptime_seconds | 3600", files["04-fetch_data.sh"])
+        import pages
+        header, rows = pages.merge_logs([(name, Capturer(self.dir, {}).raw(name, "fetch_events.sh"))])
+        self.assertEqual(header[0], "Time")
+        self.assertRegex(rows[0][0], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
+
+    def test_qmanager_wrong_password_is_not_retried(self):
+        cap = Capturer(self.dir, {"wan1": self.qm_items()}, auth_by_wan={"wan1": ("", "wrong")})
+        _, saved, errors = cap("wan1")
+        self.assertEqual((saved, STATE["qm_logins"]), (0, 1))
+        self.assertIn("check QUECTEL_PASSWORD", errors[0])
+        _, _, errors = cap("wan1")                                       # next hour: not sent again
+        self.assertEqual(STATE["qm_logins"], 1)
+        self.assertIn("not retried", errors[0])
+        cap.auth_by_wan = {"wan1": ("", "qm-pw")}                        # fixed password: tried again
+        self.assertEqual(cap("wan1")[1], 4)
+
+    def test_qmanager_without_password_never_logs_in(self):
+        _, saved, errors = Capturer(self.dir, {"wan1": self.qm_items()})("wan1")
+        self.assertEqual((saved, STATE["qm_logins"]), (0, 0))
+        self.assertIn("QUECTEL_PASSWORD not set", errors[0])
+
+    def test_qmanager_refused_at_command_is_reported(self):
+        cap = Capturer(self.dir, {"wan1": self.qm_items("at:AT+BAD\nat:AT+CSQ")}, auth_by_wan={"wan1": ("", "qm-pw")})
+        _, saved, errors = cap("wan1")
+        self.assertEqual(saved, 3)
+        self.assertEqual(errors, ["AT_BAD: modem answered command_failed"])
 
     def test_quectel_without_login_says_so(self):
         _, _, errors = Capturer(self.dir, {"wan1": self.at_items()})("wan1")

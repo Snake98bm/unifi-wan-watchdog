@@ -66,6 +66,23 @@ class AtParseTests(unittest.TestCase):
         t = pages.tables(text_html("get_ttl_status", '{"isEnabled": false, "ttl": 0}'))[0]
         self.assertIn(["isEnabled", "False"], t["rows"])
 
+    def test_qmanager_json_pages(self):
+        from atparse import at_error, at_response, text_html
+        self.assertEqual(at_response('{"success": true, "response": "AT+CSQ\\r\\r\\n+CSQ: 22,99\\r\\n\\r\\nOK\\r", '
+                                     '"command": "AT+CSQ"}'), ["+CSQ: 22,99"])
+        self.assertEqual(at_error('{"success": false, "error": "command_failed", "command": "AT+X"}'), "command_failed")
+        self.assertIsNone(at_error('{"success": true, "response": "OK"}'))
+        # status: nested fields flattened; a list of records (log entries) gets its own Time table
+        ts = pages.tables(text_html("logs.sh", '{"total": 1, "stats": {"rotated_files": 0}, "entries": ['
+                                               '{"timestamp": "2026-11-05 10:00:01", "level": "WARN", '
+                                               '"component": "poller", "message": "modem slow"}]}'))
+        self.assertIn(["stats.rotated_files", "0"], ts[0]["rows"])
+        self.assertEqual(ts[1]["header"], ["Time", "level", "component", "message"])
+        self.assertEqual(ts[1]["rows"], [["2026-11-05 10:00:01", "WARN", "poller", "modem slow"]])
+        merged = pages.merge_logs([("a", text_html("logs.sh", '{"entries": [{"timestamp": "2026-11-05 10:00:01", '
+                                                              '"message": "x"}]}'))])
+        self.assertEqual(merged[1], [["2026-11-05 10:00:01", "x"]])
+
     def test_cause_codes(self):
         r = rows("AT+CEREG?", "+CEREG: 2,1,\"5A01\",\"1A2B3C\",7\nOK")
         self.assertEqual((r["LTE status"], r["LTE status meaning"], r["LTE TAC"]), ("1", "registered (home)", "5A01"))

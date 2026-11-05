@@ -9,9 +9,15 @@ import re
 from urllib.parse import quote
 
 WAN_KEYS = ("wan1", "wan2")
-# RM520N-GL toolkit read-only status endpoints: uptime shows when the modem last rebooted; watchcat is the
-# toolkit's own ping watchdog, which reboots the modem when it's set up
-QUECTEL_PAGES = ["https://{QUECTEL_GATEWAY}/cgi-bin/get_uptime", "https://{QUECTEL_GATEWAY}/cgi-bin/get_watchcat_status"]
+# RM520N-GL QManager read-only endpoints (GET, behind its login): the dashboard status (uptime, signal, CA,
+# temperature), QManager's network-event log (band/cell changes, drops), its watchcat (ping watchdog, which
+# reboots the modem when set up) and its own log. None of them sends anything to the modem.
+QM = "https://{QUECTEL_GATEWAY}/cgi-bin/quecmanager/"
+QUECTEL_PAGES = [QM + "at_cmd/fetch_data.sh", QM + "at_cmd/fetch_events.sh", QM + "monitoring/watchdog.sh",
+                 QM + "system/logs.sh?lines=200"]
+QUECTEL_AT_URL = QM + "at_cmd/send_command.sh"
+# the RMIITools toolkit (SimpleAdmin) pages these replaced, for the settings migration in main.py
+TOOLKIT_PAGES = ["https://{QUECTEL_GATEWAY}/cgi-bin/get_uptime", "https://{QUECTEL_GATEWAY}/cgi-bin/get_watchcat_status"]
 # why it dropped: last disconnect reason, LTE/5G registration (+ reject cause), data session state and details
 CAUSE_AT = ("AT+CEER", "AT+CEREG?", "AT+C5GREG?", "AT+CGACT?", "AT+CGCONTRDP")
 SCHEDULES = {"hourly": "Hourly (on the hour)", "daily": "Daily (23:55)", "off": "Off"}
@@ -87,10 +93,10 @@ FIELDS = {
                                                    "AT+QUIMSLOT?", "AT+QGMR") + CAUSE_AT)
                      + "\n" + "\n".join(QUECTEL_PAGES),
                      None, None, "One per line: a URL, or at:<AT command> (run through the AT URL below). "
-                                 "Uses QUECTEL_USER / QUECTEL_PASSWORD."),
-    "at_url_wan1": ("WANs", "WAN 1 AT-command URL", "aturl",
-                    "https://{QUECTEL_GATEWAY}/cgi-bin/get_atcommand?atcmd={AT}", None, None,
-                    "{AT} is replaced by the command. RM520N-GL toolkit (SimpleAdmin)."),
+                                 "QManager pages log in with QUECTEL_PASSWORD."),
+    "at_url_wan1": ("WANs", "WAN 1 AT-command URL", "aturl", QUECTEL_AT_URL, None, None,
+                    "RM520N-GL QManager: .../quecmanager/at_cmd/send_command.sh (the command is POSTed as JSON). "
+                    "A URL with {AT} in it is fetched with {AT} replaced by the command instead (older web UIs)."),
     "wan2_label": ("WANs", "WAN 2 name", "text", "AT&T", None, None, ""),
     "wan2_enabled": ("WANs", "WAN 2 enabled", "bool", True, None, None,
                      "Off = the watchdog still shows this WAN but never acts on it or alerts: no down timer, no "
@@ -219,9 +225,9 @@ def validate(form, partial=True):
             clean[key] = v
         elif kind == "aturl":
             v = str(raw).strip()
-            if v and not (re.match(r"^https?://[^\s/]+(/\S*)?$", v) and "{AT}" in v
+            if v and not (re.match(r"^https?://[^\s/]+(/\S*)?$", v)
                           and not re.search(r"\{(?!AT\}|[A-Z0-9_]+_GATEWAY\})", v)):
-                errors.append(f"{label}: must be a URL containing {{AT}}")
+                errors.append(f"{label}: must be a URL (QManager's send_command.sh, or one containing {{AT}})")
                 continue
             clean[key] = v
     return clean, errors
@@ -245,8 +251,9 @@ def ban_urls(values):
 
 
 def capture_urls(values):
-    """What to save per WAN: [{"url", "name", "at"}] with {NAME_GATEWAY} filled in. "at" is the AT command for
-    at: lines (their URL is the WAN's AT URL with {AT} replaced), else None."""
+    """What to save per WAN: [{"url", "name", "at", "post"}] with {NAME_GATEWAY} filled in. "at" is the AT
+    command for at: lines, else None. An AT URL with {AT} gets the command in the URL (GET); one without it
+    (QManager's send_command.sh) is POSTed {"command": ...} as JSON ("post")."""
     out = {}
     for k in WAN_KEYS:
         items, at_url = [], str(values.get(f"at_url_{k}") or "")
@@ -257,9 +264,11 @@ def capture_urls(values):
             if line.lower().startswith("at:"):
                 cmd = line[3:].strip()
                 if at_url:
+                    get = "{AT}" in at_url
                     items.append({"url": expand(at_url).replace("{AT}", quote(cmd, safe="")),
-                                  "name": re.sub(r"[^A-Za-z0-9]+", "_", cmd).strip("_"), "at": cmd})
+                                  "name": re.sub(r"[^A-Za-z0-9]+", "_", cmd).strip("_"), "at": cmd,
+                                  "post": None if get else {"command": cmd}})
             else:
-                items.append({"url": expand(line), "name": None, "at": None})
+                items.append({"url": expand(line), "name": None, "at": None, "post": None})
         out[k] = items
     return out

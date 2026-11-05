@@ -1,6 +1,7 @@
 """Quectel AT answers (RM520N-GL) -> labelled tables, so the Modem logs pages can show and compare them.
 
-at_response(): pulls the AT text out of whatever the toolkit's web endpoint returned (plain text, HTML or JSON).
+at_response(): pulls the AT text out of whatever the modem's web endpoint returned (QManager's JSON, plain text
+or HTML).
 at_html(): one <h2> + "grid" table per command: Field | Value. Known commands get real field names
 (QENG servingcell for SA / LTE / NSA, QCAINFO, QTEMP, QMAP, CSQ, COPS, QNWINFO, ...); anything else is listed as
 value 1, value 2, ...
@@ -9,6 +10,7 @@ import csv
 import html
 import json
 import re
+import time
 
 QENG_SA = ["state", "tech", "duplex", "MCC", "MNC", "cell ID", "PCI", "TAC", "ARFCN", "band", "DL bandwidth",
            "RSRP", "RSRQ", "SINR", "SCS", "srxlev"]
@@ -27,11 +29,32 @@ REG_STATUS = {"0": "not registered", "1": "registered (home)", "2": "searching",
 CONTRDP = ["bearer", "APN", "address/mask", "gateway", "DNS 1", "DNS 2"]
 
 
+def _json(body):
+    s = (body or "").strip()
+    if s[:1] not in ("{", "["):
+        return None
+    try:
+        return json.loads(s)
+    except ValueError:
+        return None
+
+
+def at_error(body):
+    """QManager's refusal of an AT command ({"success": false, "error": "..."}) as text, else None."""
+    data = _json(body)
+    if isinstance(data, dict) and data.get("success") is False:
+        return str(data.get("error") or data.get("detail") or "an error")
+    return None
+
+
 def at_response(body):
     """The AT answer as text lines (command echo and the final OK removed)."""
     text = body or ""
     s = text.strip()
-    if s.startswith("{") or s.startswith("["):
+    data = _json(s)
+    if isinstance(data, dict) and isinstance(data.get("response"), str):     # QManager send_command.sh
+        text = data["response"]
+    elif s.startswith("{") or s.startswith("["):
         try:
             data = json.loads(s)
             vals = []
@@ -130,24 +153,87 @@ def _grid_html(title, headers, rows, classes=(), empty=None):
     return "\n".join(out)
 
 
-def text_html(title, body):
-    """A plain-text or JSON answer (toolkit endpoints like get_uptime, get_watchcat_status) as a Field | Value table."""
-    s = (body or "").strip()
-    rows = []
+TIME_KEYS = ("timestamp", "time", "ts", "date")
+
+
+def _when(v):
+    """Epoch seconds -> 'YYYY-MM-DD HH:MM:SS' local time (sorts as text, like the other log tables)."""
     try:
-        data = json.loads(s)
-        if isinstance(data, dict):
-            rows = [(str(k), json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for k, v in data.items()]
-            rows = rows or [("status", "empty (not configured)")]
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f > 1e12:                 # milliseconds
+        f /= 1000
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f)) if f > 1e9 else str(v)
+
+
+def _is_records(v):
+    return isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+
+
+def _flat(data, prefix=""):
+    """Nested dict -> [(dotted key, value)]; lists of records are left out (they get their own table)."""
+    rows = []
+    for k, v in data.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            rows += _flat(v, key + ".") or [(key, "")]
+        elif _is_records(v):
+            continue
+        elif isinstance(v, list):
+            rows.append((key, ", ".join(json.dumps(x) if isinstance(x, (dict, list)) else str(x) for x in v)))
         else:
-            rows = [("answer", json.dumps(data))]
-    except ValueError:
-        m = re.search(r"up\s+(.+?),\s+(?:\d+\s+users?,\s+)?load average:\s*(.+)$", s)
-        if m:     # uptime: "17:21:14 up  2:11,  load average: 2.73, 2.60, 2.53"
-            rows = [("modem time", s.split()[0]), ("uptime", re.sub(r"\s+", " ", m.group(1)).strip(", ")),
-                    ("load average", m.group(2).strip())]
-        else:
-            rows = [("answer", ln.strip()) for ln in s.splitlines() if ln.strip()]
+            rows.append((key, "" if v is None else str(v)))
+    return rows
+
+
+def _records_html(title, records):
+    """A list of JSON objects (QManager events / log entries) as one table, its time column first and named
+    Time, so the 30-day view merges them into one log."""
+    keys = []
+    for r in records:
+        keys += [k for k in r if k not in keys]
+    tkey = next((k for k in keys if k.lower() in TIME_KEYS), None)
+    if tkey:
+        keys = [tkey] + [k for k in keys if k != tkey]
+    header = ["Time" if k == tkey else k for k in keys]
+    rows = []
+    for r in records:
+        rows.append([_when(r.get(k)) if k == tkey else
+                     (json.dumps(r[k]) if isinstance(r.get(k), (dict, list)) else str(r.get(k, "") or ""))
+                     for k in keys])
+    if tkey:
+        rows.sort(key=lambda row: row[0], reverse=True)
+    return _grid_html(title, header, rows, tuple("left" if k in ("message", "detail") else "" for k in keys))
+
+
+def _json_html(title, data):
+    if _is_records(data):
+        return _records_html(title, data)
+    if isinstance(data, dict):
+        parts = []
+        rows = _flat(data)
+        if rows or not data:
+            parts.append(_grid_html(title, ("Field", "Value"), _unique(rows or [("status", "empty (not configured)")]),
+                                    ("heading",)))
+        parts += [_records_html(f"{title} - {k}", v) for k, v in data.items() if _is_records(v)]
+        return "\n".join(parts)
+    return _grid_html(title, ("Field", "Value"), [("answer", json.dumps(data))], ("heading",))
+
+
+def text_html(title, body):
+    """A plain-text or JSON answer (QManager's status/events/log endpoints, the toolkit's get_uptime) as tables:
+    nested fields flattened to Field | Value, lists of records (events, log entries) as their own table."""
+    s = (body or "").strip()
+    data = _json(s)
+    if data is not None:
+        return _json_html(title, data)
+    m = re.search(r"up\s+(.+?),\s+(?:\d+\s+users?,\s+)?load average:\s*(.+)$", s)
+    if m:     # uptime: "17:21:14 up  2:11,  load average: 2.73, 2.60, 2.53"
+        rows = [("modem time", s.split()[0]), ("uptime", re.sub(r"\s+", " ", m.group(1)).strip(", ")),
+                ("load average", m.group(2).strip())]
+    else:
+        rows = [("answer", ln.strip()) for ln in s.splitlines() if ln.strip()]
     return _grid_html(title, ("Field", "Value"), _unique(rows), ("heading",))
 
 

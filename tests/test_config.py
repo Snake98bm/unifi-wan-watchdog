@@ -30,13 +30,27 @@ class ConfigTests(unittest.TestCase):
         clean, errors = config.validate({"capture_wan1": 'at:AT+QENG="servingcell"\nat:AT+CSQ',
                                          "at_url_wan1": "https://{QUECTEL_GATEWAY}/cgi-bin/get_atcommand?atcmd={AT}"})
         self.assertEqual(errors, [])
-        _, errors = config.validate({"capture_wan1": "at:rm -rf /", "at_url_wan1": "https://x/no-placeholder"})
+        _, errors = config.validate({"capture_wan1": "at:rm -rf /", "at_url_wan1": "x/not-a-url"})
         self.assertEqual(len(errors), 2)
+        _, errors = config.validate({"at_url_wan1": "https://{UNIFI_API_KEY}/x"})   # only *_GATEWAY placeholders
+        self.assertEqual(len(errors), 1)
         with mock.patch.dict(os.environ, {}, clear=True):
             items = config.capture_urls({**clean, "capture_wan2": ""})["wan1"]
         self.assertEqual(items[0]["url"],
                          "https://192.168.225.1/cgi-bin/get_atcommand?atcmd=AT%2BQENG%3D%22servingcell%22")
         self.assertEqual((items[0]["name"], items[0]["at"]), ("AT_QENG_servingcell", 'AT+QENG="servingcell"'))
+        self.assertIsNone(items[0]["post"])
+
+    def test_qmanager_default_posts_the_command(self):
+        clean, errors = config.validate({"capture_wan1": config.FIELDS["capture_wan1"][3],
+                                         "at_url_wan1": config.FIELDS["at_url_wan1"][3]})
+        self.assertEqual(errors, [])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            items = config.capture_urls({**clean, "capture_wan2": ""})["wan1"]
+        at = [i for i in items if i["at"]]
+        self.assertEqual(at[0]["url"], "https://192.168.225.1/cgi-bin/quecmanager/at_cmd/send_command.sh")
+        self.assertEqual(at[0]["post"], {"command": 'AT+QENG="servingcell"'})
+        self.assertIn("https://192.168.225.1/cgi-bin/quecmanager/at_cmd/fetch_events.sh", [i["url"] for i in items])
 
     def test_gateway_with_scheme_or_slash_still_works(self):
         for value in ("https://192.168.225.1", "192.168.225.1/", "HTTP://192.168.225.1/", " 192.168.225.1 "):
