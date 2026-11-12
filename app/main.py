@@ -332,6 +332,15 @@ def api_modem_signal(wan):
     return jsonify(modem_store.signal_series(wan, now - _hours() * 3600, now))
 
 
+@app.get("/api/modem/<wan>/stamp")
+@login_required
+def api_modem_stamp(wan):
+    """Newest data time for a tab: the page polls this and redraws only when it changes."""
+    if wan not in config.WAN_KEYS:
+        abort(404)
+    return jsonify(stamp=modem_store.stamp(wan, "signal" if request.args.get("tab") != "health" else "health"))
+
+
 @app.get("/api/modem/<wan>/series")
 @login_required
 def api_modem_series(wan):

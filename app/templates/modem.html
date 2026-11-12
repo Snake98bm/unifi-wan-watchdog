@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{% set auto_refresh = 10 %}
+{% if wan %}{% set refresh_when = url_for("api_modem_stamp", wan=wan, tab=tab) %}{% endif %}
 {% block head %}
 <script src="{{ url_for('static', filename='chart.js') }}?v={{ version }}"></script>
 <style>
@@ -26,7 +28,7 @@
 .metric .val small { font-weight: 400; color: var(--muted); }
 .rat-title { display: flex; align-items: center; gap: 8px; }
 .rat-dot { width: 9px; height: 9px; border-radius: 3px; }
-.chart { min-height: 120px; }
+.chart { min-height: 228px; }
 .ct { font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
 </style>
 {% endblock %}

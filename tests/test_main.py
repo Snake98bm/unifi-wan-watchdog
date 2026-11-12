@@ -54,6 +54,13 @@ class WebTests(unittest.TestCase):
         body = self.c.get("/modem").get_data(as_text=True)
         self.assertIn("Signal history", body)
         self.assertIn("No signal", body)                  # -140 is shown as no signal, not "Poor"
+        self.assertIn('data-refresh="10"', body)           # checks for new data every 10 s ...
+        self.assertIn('data-refresh-when="/api/modem/wan1/stamp?tab=signal"', body)
+        before = self.c.get("/api/modem/wan1/stamp?tab=health").get_json()["stamp"]
+        main.modem_store.add_metrics("wan1", now - 5, {"poe_w": 2.9})       # ... and redraws when the stamp moves
+        self.assertGreater(self.c.get("/api/modem/wan1/stamp?tab=health").get_json()["stamp"], before)
+        sig = self.c.get("/api/modem/wan1/stamp").get_json()["stamp"]
+        self.assertEqual(sig, int(now - 60))                # signal tab: antenna data, not PoE
         self.assertIn(">Week</a>", body)
         self.assertIn(">Month</a>", body)
         self.assertIn("last month", self.c.get("/modem?tab=health&range=month").get_data(as_text=True))

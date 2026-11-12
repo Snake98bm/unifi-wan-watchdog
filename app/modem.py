@@ -173,6 +173,14 @@ class ModemStore:
                            [(wan, ts, k, float(v)) for k, v in values.items()])
         self._added(len(values))
 
+    def stamp(self, wan, tab):
+        """When this WAN's data last changed, for the page's 'redraw when there's new data' check."""
+        q = ("SELECT MAX(ts) FROM signal WHERE wan = ? UNION ALL SELECT MAX(ts) FROM metrics WHERE wan = ? AND "
+             "name = 'temp'") if tab == "signal" else "SELECT MAX(ts) FROM metrics WHERE wan = ? AND ? = ?"
+        args = (wan, wan) if tab == "signal" else (wan, 1, 1)
+        with self.lock, self._db() as db:
+            return max((r[0] or 0 for r in db.execute(q, args)), default=0)
+
     def last_signal_ts(self, wan):
         with self.lock, self._db() as db:
             return db.execute("SELECT MAX(ts) FROM signal WHERE wan = ?", (wan,)).fetchone()[0]

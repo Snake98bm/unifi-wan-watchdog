@@ -119,9 +119,17 @@
     svg.addEventListener("mouseleave", function () { cross.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
   }
 
+  // one resize handler for every chart; charts removed by a page refresh drop out of the list
+  var charts = [];
+  window.addEventListener("resize", function () {
+    charts = charts.filter(function (c) { return c.el.isConnected; });
+    charts.forEach(function (c) {
+      if (Math.abs(c.el.clientWidth - c.w) > 20) { c.w = c.el.clientWidth; draw(c.el, c.opt); }
+    });
+  });
   window.wwChart = function (el, opt) {
     draw(el, opt);
-    var w = el.clientWidth;
-    window.addEventListener("resize", function () { if (Math.abs(el.clientWidth - w) > 20) { w = el.clientWidth; draw(el, opt); } });
+    charts = charts.filter(function (c) { return c.el.isConnected && c.el !== el; });
+    charts.push({el: el, opt: opt, w: el.clientWidth});
   };
 })();

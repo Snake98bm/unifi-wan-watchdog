@@ -143,7 +143,7 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
 .spark line { stroke: var(--down); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .7; }
 </style>
 </head>
-<body{% if auto_refresh is defined %} data-refresh="{{ auto_refresh }}"{% endif %}>
+<body{% if auto_refresh is defined %} data-refresh="{{ auto_refresh }}"{% endif %}{% if refresh_when is defined %} data-refresh-when="{{ refresh_when }}"{% endif %}>
 {% if session.auth %}
 <div class="shell">
   <aside class="side" id="side">
@@ -211,11 +211,35 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
     }).then(function (html) {
       if (busy()) return;
       var doc = new DOMParser().parseFromString(html, "text/html"), main = doc.querySelector("main"), lc = doc.getElementById("last-check");
-      if (main) document.querySelector("main").innerHTML = main.innerHTML;
+      if (main) {
+        var live = document.querySelector("main");
+        live.innerHTML = main.innerHTML;
+        live.querySelectorAll("script").forEach(function (old) {   // innerHTML doesn't run scripts: re-run them (charts)
+          var s = document.createElement("script");
+          s.textContent = old.textContent;
+          old.replaceWith(s);
+        });
+      }
       if (lc && el) { el.dataset.ts = lc.dataset.ts; tick(); }
     }).catch(function () {});
   }
-  setInterval(refresh, secs * 1000);
+  // data-refresh-when: a small URL answering with a "newest data" stamp; the content is reloaded only when the
+  // stamp changes, so charts redraw when there is new data instead of on a timer
+  var when = document.body.dataset.refreshWhen, last = null;
+  function check() {
+    if (!when) return refresh();
+    if (busy()) return;
+    fetch(when, {credentials: "same-origin"}).then(function (r) {
+      if (r.redirected) { location.reload(); throw 0; }
+      if (!r.ok) throw 0;
+      return r.text();
+    }).then(function (stamp) {
+      if (last !== null && stamp !== last) refresh();
+      last = stamp;
+    }).catch(function () {});
+  }
+  if (when) check();                          // the page as loaded is the baseline
+  setInterval(check, secs * 1000);
 })();
 </script>
 </body>
