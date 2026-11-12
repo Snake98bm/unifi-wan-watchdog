@@ -14,6 +14,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<script>
+// theme picked in the sidebar (Auto / Light / Dark), remembered in this browser; set before the page paints
+try { var t = localStorage.getItem("ww-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 {% block head %}{% endblock %}
 <title>{{ titles.get(request.endpoint, "WAN Watchdog") }} · WAN Watchdog</title>
 <style>
@@ -25,16 +29,29 @@
   --q-excellent: #16a34a; --q-good: #65a30d; --q-fair: #d97706; --q-poor: #ea580c; --q-bad: #dc2626;
   --lte: #2563eb; --nr: #9333ea;
 }
+/* dark: when the browser/system is dark (Auto), or when Dark is picked in the sidebar */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #09090b; --side: #0c0c0f; --card: #131316; --text: #fafafa; --muted: #a1a1aa; --border: #27272a;
     --soft: #1c1c20; --code: #1c1c20; --ring: #52525b;
     --up: #4ade80; --down: #f87171; --warn: #fbbf24; --accent: #60a5fa; --info: #22d3ee;
     --up-bg: #14532d55; --down-bg: #7f1d1d55; --warn-bg: #78350f55; --accent-bg: #1e3a8a55;
     --q-excellent: #4ade80; --q-good: #a3e635; --q-fair: #fbbf24; --q-poor: #fb923c; --q-bad: #f87171;
-    --lte: #60a5fa; --nr: #c084fc;
+    --lte: #60a5fa; --nr: #c084fc; color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+  --bg: #09090b; --side: #0c0c0f; --card: #131316; --text: #fafafa; --muted: #a1a1aa; --border: #27272a;
+  --soft: #1c1c20; --code: #1c1c20; --ring: #52525b;
+  --up: #4ade80; --down: #f87171; --warn: #fbbf24; --accent: #60a5fa; --info: #22d3ee;
+  --up-bg: #14532d55; --down-bg: #7f1d1d55; --warn-bg: #78350f55; --accent-bg: #1e3a8a55;
+  --q-excellent: #4ade80; --q-good: #a3e635; --q-fair: #fbbf24; --q-poor: #fb923c; --q-bad: #f87171;
+  --lte: #60a5fa; --nr: #c084fc; color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
+.theme { display: flex; padding: 3px; gap: 2px; background: var(--soft); border: 1px solid var(--border); border-radius: 9px; margin: 0 2px 10px; }
+.theme button { flex: 1; justify-content: center; border: 0; background: transparent; color: var(--muted); padding: 4px 6px; font-size: 12px; border-radius: 6px; }
+.theme button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px #0002; }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 body { background: var(--bg); color: var(--text); font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -158,7 +175,10 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
       <a class="nav{{ ' on' if on }}" href="{{ url_for(ep) }}"><svg class="i" viewBox="0 0 24 24"><path d="{{ icon }}"/></svg>{{ label }}</a>
       {% endfor %}
     {% endfor %}
-    <div class="foot">
+    <div class="theme" role="group" aria-label="Theme" style="margin-top: auto;">
+      {% for k, label in [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")] %}<button type="button" data-theme-pick="{{ k }}" title="{{ 'Follow this computer' if k == 'auto' else label ~ ' theme' }}">{{ label }}</button>{% endfor %}
+    </div>
+    <div class="foot" style="margin-top: 0;">
       <span class="muted" style="font-size: 12px;">{% if s is defined and s and s.gw_version %}Gateway {{ s.gw_version.split(".v")[-1] if ".v" in s.gw_version else s.gw_version }}{% endif %}</span>
       <form class="inline" method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>Log out</button></form>
     </div>
@@ -193,6 +213,20 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
     el.className = age > 3 * every + 15 ? "stale" : "";
   }
   tick(); setInterval(tick, 1000);
+  function showTheme() {
+    var cur = document.documentElement.dataset.theme || "auto";
+    document.querySelectorAll("[data-theme-pick]").forEach(function (b) { b.classList.toggle("on", b.dataset.themePick === cur); });
+  }
+  document.querySelectorAll("[data-theme-pick]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var k = b.dataset.themePick;
+      if (k === "auto") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = k;
+      try { if (k === "auto") localStorage.removeItem("ww-theme"); else localStorage.setItem("ww-theme", k); } catch (e) {}
+      showTheme();
+      if (document.querySelector(".chart svg")) location.reload();      // charts pick their colours when drawn
+    });
+  });
+  showTheme();
   document.addEventListener("click", function (e) {
     if (document.body.classList.contains("menu") && !e.target.closest("#side, .menu-btn")) document.body.classList.remove("menu");
   });

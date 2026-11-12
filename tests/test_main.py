@@ -54,6 +54,8 @@ class WebTests(unittest.TestCase):
         body = self.c.get("/modem").get_data(as_text=True)
         self.assertIn("Signal history", body)
         self.assertIn("No signal", body)                  # -140 is shown as no signal, not "Poor"
+        for k in ("auto", "light", "dark"):                 # theme switch in the sidebar
+            self.assertIn(f'data-theme-pick="{k}"', body)
         self.assertIn('data-refresh="10"', body)           # checks for new data every 10 s ...
         self.assertIn('data-refresh-when="/api/modem/wan1/stamp?tab=signal"', body)
         before = self.c.get("/api/modem/wan1/stamp?tab=health").get_json()["stamp"]
