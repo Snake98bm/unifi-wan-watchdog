@@ -23,6 +23,7 @@ from bounce import Bouncer
 from capture import Capturer, schedule_slot
 from modem import SSH_SENSORS, ModemSensors, ModemStore, ModemWatch
 from monitor import Monitor
+from speedtest import SpeedStore, SpeedTester, by_setup, link_text
 from store import Events, Probes, Settings
 from unifi import UniFi, UniFiError
 from version import VERSION
@@ -145,6 +146,9 @@ modem_sensors = ModemSensors(os.environ.get("MODEM_SSH_HOST") or config.gateway_
 modem = ModemWatch(modem_store, events, settings, capture=capturer, sensors=modem_sensors)
 monitor = Monitor(cfg, client, events, settings, capture=capturer, bouncer=bouncer, probe_dir=PROBE_DIR,
                   probe_history=probe_history, modem=modem)
+# Speed tests: run by the probe containers on request, saved with the line's channel widths / sync rates
+speed_store = SpeedStore(os.path.join(DATA, "speed.db"))
+speed = SpeedTester(speed_store, events, settings, monitor, modem=modem, probe_dir=PROBE_DIR)
 
 
 def apply_settings():
@@ -355,6 +359,13 @@ def api_modem_series(wan):
 @login_required
 def api_status():
     return jsonify(monitor.snapshot())
+
+
+@app.get("/api/last-check")
+@login_required
+def api_last_check():
+    """For the header's "Last check" on every page (small: not the whole status)."""
+    return jsonify(last_check=monitor.last_check, interval=cfg["check_interval"])
 
 
 @app.post("/cycle/<key>")
@@ -665,6 +676,35 @@ def internet():
     return render_template("internet.html", s=s, hist=hist, totals=totals, days=days)
 
 
+@app.get("/speed")
+@login_required
+def speed_page():
+    """Speed-test results (newest first) and the averages per carrier setup. ?days=7|30|90|365"""
+    try:
+        days = int(request.args.get("days") or 30)
+    except ValueError:
+        days = 30
+    days = max(1, min(days, speed_store.keep_days))
+    rows = speed_store.recent(time.time() - days * 86400)
+    for r in rows:
+        r["link_text"] = link_text(r.get("link"))
+        link = r.get("link") or {}
+        r["per_mhz"] = round(r["down_mbps"] / link["total_mhz"], 2)             if r["down_mbps"] and link.get("kind") == "cell" and link.get("total_mhz") else None
+        r["of_sync"] = round(100 * r["down_mbps"] * 1000 / link["sync_down"])             if r["down_mbps"] and link.get("kind") == "dsl" and link.get("sync_down") else None
+    return render_template("speed.html", s=monitor.snapshot(), rows=rows, setups=by_setup(rows), days=days,
+                           running=speed.snapshot(), next_run=speed.next_run(datetime.now()),
+                           targets=speed.targets())
+
+
+@app.post("/speed/run")
+@login_required
+def speed_run():
+    only = request.form.get("wan") or None
+    ok, msg = speed.start("on request from the web page", only=only)
+    flash(msg, "ok" if ok else "error")
+    return redirect(url_for("speed_page"))
+
+
 @app.get("/captures/<name>/text")
 @login_required
 def capture_text(name):
@@ -721,6 +761,17 @@ def box_reboot_schedule():
         time.sleep(30)
 
 
+def speed_schedule():
+    """Start the scheduled speed tests (Settings: Speed test)."""
+    time.sleep(60)
+    while True:
+        try:
+            speed.tick(datetime.now())
+        except Exception as e:
+            events.add("error", None, f"Speed-test schedule failed: {e}")
+        time.sleep(20)
+
+
 @app.get("/healthz")
 def healthz():
     last = monitor.last_check
@@ -735,4 +786,5 @@ if __name__ == "__main__":
     threading.Thread(target=capture_schedule, daemon=True, name="capture-schedule").start()
     threading.Thread(target=box_reboot_schedule, daemon=True, name="box-reboot").start()
     threading.Thread(target=signal_sampler, daemon=True, name="signal-sampler").start()
+    threading.Thread(target=speed_schedule, daemon=True, name="speed-schedule").start()
     serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threads=4, ident="wan-watchdog")

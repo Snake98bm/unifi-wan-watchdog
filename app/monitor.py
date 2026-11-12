@@ -448,7 +448,7 @@ class Monitor(threading.Thread):
         elif w.wrong_path_logged:
             w.wrong_path_logged = False
             self.events.add("info", w.key, f"{w.label}'s internet probe goes out through {w.label} again")
-        if self.probe_history and verdict in ("ok", "fail"):
+        if self.probe_history and verdict in ("ok", "fail") and not probe.get("speedtest"):   # not while saturated
             pings = probe.get("targets") or []
             rtts = [p["avg_ms"] for p in pings if p.get("avg_ms") is not None]
             self.probe_history.add(probe["ts"], w.key, verdict, sum(p.get("sent", 0) for p in pings),
@@ -506,7 +506,7 @@ class Monitor(threading.Thread):
             v.fails += 1
         if new:
             v.probe_ts = probe.get("ts")
-            if self.probe_history and verdict in ("ok", "fail", "banned"):
+            if self.probe_history and verdict in ("ok", "fail", "banned") and not probe.get("speedtest"):
                 pings = probe.get("targets") or []
                 rtts = [p["avg_ms"] for p in pings if p.get("avg_ms") is not None]
                 self.probe_history.add(probe["ts"], VPN_KEY, verdict, sum(p.get("sent", 0) for p in pings),

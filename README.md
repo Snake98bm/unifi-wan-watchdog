@@ -63,6 +63,17 @@ why the line went down.
     supply, or PoE dropped), the power cycle is skipped with a clear warning instead of failing at the gateway.
   - **The modem's own sensors (optional):** case, board and amplifier temperatures and its supply rail, read over
     SSH with each save, see below.
+- **Speed tests (scheduled):** at 01:30, 04:30 and 19:00 by default (Settings, Speed test), each WAN in turn
+  runs a speed test **in its own probe container**, so it really goes out through that WAN: Cloudflare's speed
+  test (`speed.cloudflare.com`, looked up over DNS-over-HTTPS at 1.1.1.1), idle ping, then 10 s download and 10 s
+  upload over 6 connections (the first 2 s left out), with ping under load. While the download runs the watchdog
+  notes the line: for the QManager modem the network type, the carriers with their **channel widths** (e.g.
+  `B66: 20 MHz + N77: 100 MHz`), total MHz, signal and temperature; for the AT&T box the latest DSL sync rates.
+  The **Speed tests** page lists every result (Mbps per MHz, or % of DSL sync) and averages them **per carrier
+  setup**, so speed can be matched to channel width. Results are kept a year in `speed.db`. A WAN that is down,
+  being reset, or whose probe isn't answering is skipped (and listed as skipped); the probe's normal results during
+  a test are left out of the latency history. "Run now" on the page tests all WANs or one. Data used is about
+  speed x time (10 s at 500 Mbps is about 0.6 GB each way). Optionally the VPN too.
 - **Web UI** with a password: status, confirmation pop-ups, event log, settings (saved in `/data`, applied
   live), diagnostics. Light and dark themes follow the browser.
 
@@ -113,7 +124,7 @@ why the line went down.
 ```sh
 docker run --rm -v "$PWD:/w:ro" -w /w --entrypoint python local/wan-watchdog:1 tests/test_monitor.py
 ```
-(also `test_modem`, `test_probe`, `test_vpn`, `test_config`, `test_capture`, `test_pages`, `test_atparse`,
+(also `test_modem`, `test_probe`, `test_speedtest`, `test_vpn`, `test_config`, `test_capture`, `test_pages`, `test_atparse`,
 `test_dsl`, `test_unifi`, `test_bounce`, `test_main`).
 
 ## Notes

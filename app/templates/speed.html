@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% macro csrf() %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endmacro %}
+{% macro n(v, fmt="%.0f") %}{{ fmt|format(v) if v is not none else "-" }}{% endmacro %}
+{% if running %}{% set auto_refresh = 5 %}{% endif %}
+{% block body %}
+<div class="card" style="margin-bottom: 16px;">
+  <h2>Speed tests
+    <form method="get" style="font-size: 14px; font-weight: normal;">
+      <select name="days" onchange="this.form.submit()">
+        {% for d, label in [(7, "Last 7 days"), (30, "Last 30 days"), (90, "Last 90 days"), (365, "Last year")] %}
+        <option value="{{ d }}" {{ "selected" if days == d }}>{{ label }}</option>{% endfor %}
+      </select>
+    </form>
+  </h2>
+  <p class="muted">Each WAN is tested in turn through its own internet probe (so the test really uses that WAN), against
+    Cloudflare's speed test: {{ s.settings.speedtest_seconds }} s download, then {{ s.settings.speedtest_seconds }} s upload.
+    The line is noted during the download: carriers and channel widths for the cellular modem, sync rates for DSL.
+    {% if s.settings.speedtest_enabled %}Scheduled at <b>{{ s.settings.speedtest_times }}</b>{% if next_run %}, next {{ next_run }}{% endif %}.
+    {% else %}<strong>Scheduled tests are off</strong> (Settings, Speed test).{% endif %}</p>
+  {% if running %}
+    <p><span class="badge warn">Running</span> {{ running.label or "" }} {{ running.phase }}
+      <span class="muted">({{ running.trigger }}; {{ running.queue|join(", ") }})</span></p>
+  {% else %}
+    <form method="post" action="{{ url_for('speed_run') }}" class="inline">{{ csrf() }}<button class="primary">Run now ({{ targets|map(attribute=1)|join(", ") or "nothing to test" }})</button></form>
+    {% for key, label in targets %}<form method="post" action="{{ url_for('speed_run') }}" class="inline">{{ csrf() }}<input type="hidden" name="wan" value="{{ key }}"><button>{{ label }} only</button></form>{% endfor %}
+  {% endif %}
+</div>
+
+{% if setups %}
+<div class="card" style="margin-bottom: 16px;">
+  <h2>By carrier setup</h2>
+  <p class="muted">Finished cellular tests in this period, grouped by the bands and channel widths in use during the download.
+    Mbps per MHz = average download / total channel width.</p>
+  <div class="table-wrap"><table>
+    <tr><th>WAN</th><th>Carriers</th><th class="num">MHz</th><th class="num">Tests</th><th class="num">Avg down</th>
+        <th class="num">Best down</th><th class="num">Avg up</th><th class="num">Mbps/MHz</th></tr>
+    {% for g in setups %}
+    <tr><td>{{ g.label }}</td><td>{{ g.carriers }}</td><td class="num">{{ n(g.total_mhz, "%g") }}</td>
+        <td class="num">{{ g.tests }}</td><td class="num">{{ n(g.down, "%.1f") }}</td><td class="num">{{ n(g.best_down, "%.1f") }}</td>
+        <td class="num">{{ n(g.up, "%.1f") }}</td><td class="num">{{ n(g.per_mhz, "%.2f") }}</td></tr>
+    {% endfor %}
+  </table></div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Results</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Time</th><th>WAN</th><th class="num">Down Mbps</th><th class="num">Up Mbps</th><th class="num">Idle ms</th>
+        <th class="num">Loaded ms<br><small>down / up</small></th><th>Line during the test</th><th class="num">Mbps/MHz<br><small>or % of sync</small></th>
+        <th class="num">Data MB</th><th>Server</th><th>Note</th></tr>
+    {% for r in rows %}
+    <tr><td class="ts">{{ r.ts|when }}</td><td>{{ r.label }}</td>
+      {% if r.state == "done" %}
+        <td class="num"><b>{{ n(r.down_mbps, "%.1f") }}</b></td><td class="num"><b>{{ n(r.up_mbps, "%.1f") }}</b></td>
+        <td class="num">{{ n(r.idle_ms) }}</td><td class="num">{{ n(r.down_ms) }} / {{ n(r.up_ms) }}</td>
+      {% else %}
+        <td colspan="4" class="{{ 'muted' if r.state == 'skipped' else 'bad' }}">{{ r.state }}</td>
+      {% endif %}
+      <td>{{ r.link_text or "-" }}{% if r.link and r.link.kind == "cell" and (r.link.nr_sinr is not none or r.link.lte_rsrp is not none) %}
+          <div class="muted" style="font-size: 12px;">{% if r.link.lte_rsrp is not none %}LTE RSRP {{ r.link.lte_rsrp }}{% endif %}{% if r.link.nr_rsrp is not none %} · NR RSRP {{ r.link.nr_rsrp }}{% endif %}{% if r.link.nr_sinr is not none %} · NR SINR {{ r.link.nr_sinr }}{% endif %}{% if r.link.temp is not none %} · {{ r.link.temp }} °C{% endif %}</div>
+        {% elif r.link and r.link.kind == "dsl" and r.link.age_min is not none %}<div class="muted" style="font-size: 12px;">from the save {{ r.link.age_min }} min before</div>{% endif %}</td>
+      <td class="num">{% if r.per_mhz is not none %}{{ "%.2f"|format(r.per_mhz) }}{% elif r.of_sync is not none %}{{ r.of_sync }}%{% else %}-{% endif %}</td>
+      <td class="num">{{ n(r.data_mb) if r.state == "done" else "" }}</td>
+      <td>{{ r.colo or "" }}</td>
+      <td class="muted">{{ r.error or "" }}{% if r.trigger and not r.trigger.startswith("scheduled") %} (by hand){% endif %}</td></tr>
+    {% else %}<tr><td colspan="11" class="muted">No speed tests yet.</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endblock %}

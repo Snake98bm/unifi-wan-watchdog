@@ -1,9 +1,10 @@
-{%- set titles = {"dashboard": "Status", "modem_page": "Signal & health", "internet": "Internet", "log": "Event log",
+{%- set titles = {"dashboard": "Status", "modem_page": "Signal & health", "internet": "Internet", "speed_page": "Speed tests", "log": "Event log",
      "captures": "Modem logs", "captures_combined": "Modem logs", "capture_text": "Modem logs", "all_settings": "Settings",
      "settings_from_gateway": "Settings", "diag": "Diagnostics"} -%}
 {%- set nav = [("Overview", [("dashboard", "Status", "M3 12h4l3-8 4 16 3-8h4")]),
                ("Cellular", [("modem_page", "Signal & health", "M2 20h2v-3H2zM7 20h2v-7H7zM12 20h2V9h-2zM17 20h2V4h-2z")]),
                ("Network", [("internet", "Internet", "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"),
+                            ("speed_page", "Speed tests", "M4 16a8 8 0 1 1 16 0M12 16l4-5M4 20h16"),
                             ("log", "Event log", "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"),
                             ("captures", "Modem logs", "M4 5h16v4H4zM4 11h16v4H4zM4 17h16v2H4z")]),
                ("System", [("all_settings", "Settings", "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2M18 12h2M12 4v2M12 18v2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M6.3 17.7l1.4-1.4M16.3 7.7l1.4-1.4"),
@@ -200,7 +201,7 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
 {% endif %}
 <script>
 // "Last check" ticks every second; pages with data-refresh reload their content in place (no page reload),
-// but never while a pop-up is open, a field has focus, or the tab is hidden
+// but never while a pop-up is open, you're typing in a field, or the tab is hidden
 (function () {
   var el = document.getElementById("last-check");
   function ago(s) { s = Math.max(0, Math.round(s)); return s < 60 ? s + " s ago" : Math.floor(s / 60) + " min " + (s % 60) + " s ago"; }
@@ -213,6 +214,18 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
     el.className = age > 3 * every + 15 ? "stale" : "";
   }
   tick(); setInterval(tick, 1000);
+  // the header's "Last check" follows the server on every page, also where the content itself isn't reloaded
+  // (Settings, Modem logs) or only on new data (Signal & health)
+  function lastCheck() {
+    if (!el || document.hidden) return;
+    fetch("{{ url_for('api_last_check') }}", {credentials: "same-origin"}).then(function (r) {
+      if (!r.ok || r.redirected) throw 0;
+      return r.json();
+    }).then(function (d) {
+      if (d.last_check) { el.dataset.ts = d.last_check; tick(); }
+    }).catch(function () {});
+  }
+  if (el) { setInterval(lastCheck, 15000); document.addEventListener("visibilitychange", lastCheck); }
   function showTheme() {
     var cur = document.documentElement.dataset.theme || "auto";
     document.querySelectorAll("[data-theme-pick]").forEach(function (b) { b.classList.toggle("on", b.dataset.themePick === cur); });
@@ -234,7 +247,8 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
   if (!secs) return;
   function busy() {
     var a = document.activeElement;
-    return document.hidden || document.querySelector("dialog[open]") || (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
+    var typing = a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && !/^(checkbox|radio|button|submit|hidden)$/i.test(a.type)));
+    return document.hidden || document.querySelector("dialog[open]") || typing;   // a clicked checkbox / list keeps focus: not busy
   }
   function refresh() {
     if (busy()) return;

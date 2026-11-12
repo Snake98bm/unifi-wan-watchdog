@@ -46,6 +46,18 @@ FIELDS = {
                     "On = a WAN whose probe (on a VLAN routed out of that WAN only) gets no reply twice in a row "
                     "counts as offline even when its link and IP look fine, and is reset after the same 'Down "
                     "for' time. Off = probes are only shown and logged."),
+    "speedtest_enabled": ("Speed test", "Run scheduled speed tests", "bool", True, None, None,
+                          "Each WAN in turn, through its own internet probe container, against Cloudflare's speed test "
+                          "(speed.cloudflare.com). The result is saved with the line at that moment: carriers and channel "
+                          "widths for the cellular modem, sync rates for DSL (Speed tests page). Run now works even "
+                          "when this is off."),
+    "speedtest_times": ("Speed test", "Run at (HH:MM, local)", "times", "01:30, 04:30, 19:00", None, None,
+                        "Comma-separated, 24-hour clock."),
+    "speedtest_seconds": ("Speed test", "Seconds per direction", "int", 10, 5, 30,
+                          "Download, then upload, this long each (plus 2 s of ramp-up not counted). Data used is about "
+                          "speed x time: 10 s at 500 Mbps is about 0.6 GB."),
+    "speedtest_vpn": ("Speed test", "Also test the VPN", "bool", False, None, None,
+                      "Through the VPN probe, after the WANs. Needs 'Watch the VPN' on."),
     "vpn_check": ("VPN", "Watch the VPN", "bool", True, None, None,
                   "Needs the vpn-probe container (on a VLAN routed through the VPN only, kill switch on). On = the "
                   "VPN is reconnected when its probe gets no reply for the time below, or when a ban-check site "
@@ -156,7 +168,7 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem", "Modem logs", "Modem reboot",
+GROUPS = ["General", "Reset rules", "Internet check", "Speed test", "Port bounce", "VPN", "Modem", "Modem logs", "Modem reboot",
           "DSL", "WANs"]
 WEB_URL_RE = re.compile(r"^https?://[^\s/]+(/\S*)?$")
 MAX_BAN_URLS = 4
@@ -260,6 +272,16 @@ def validate(form, partial=True):
                 errors.append(f"{label}: at most {MAX_BAN_URLS}")
                 continue
             clean[key] = "\n".join(items)
+        elif kind == "times":
+            items = [t for t in re.split(r"[\s,;]+", str(raw).strip()) if t]
+            bad = [t for t in items if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", t)]
+            if bad:
+                errors.append(f"{label}: not a time (HH:MM): {bad[0]}")
+                continue
+            if len(items) > 24:
+                errors.append(f"{label}: at most 24 times")
+                continue
+            clean[key] = ", ".join(sorted({f"{int(t.split(':')[0]):02d}:{t.split(':')[1]}" for t in items}))
         elif kind == "tun":
             v = str(raw).strip()
             if v and not re.fullmatch(r"tun[a-z0-9]{1,12}", v):

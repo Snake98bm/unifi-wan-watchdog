@@ -38,6 +38,34 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="last-check"', home)
         self.assertIn("<body>", self.c.get("/settings/all").get_data(as_text=True))   # forms: no auto refresh
 
+    def test_speed_page(self):
+        self.login("/")
+        now = main.time.time()
+        main.speed_store.add({"ts": now - 60, "wan": "wan1", "label": "Verizon", "trigger": "scheduled 19:00",
+                              "state": "done", "down_mbps": 412.3, "up_mbps": 38.1, "idle_ms": 30, "down_ms": 80,
+                              "up_ms": 120, "data_mb": 650, "colo": "LAX",
+                              "link": {"kind": "cell", "type": "5G-NSA", "carriers": "B66: 20 MHz + N77: 100 MHz",
+                                       "total_mhz": 120, "nr_sinr": 14}})
+        main.speed_store.add({"ts": now - 30, "wan": "wan2", "label": "AT&T", "trigger": "scheduled 19:00",
+                              "state": "done", "down_mbps": 88.0, "up_mbps": 17.5, "data_mb": 120,
+                              "link": {"kind": "dsl", "sync_down": 100000, "sync_up": 20000, "pairs_up": 2,
+                                       "pairs": 2, "age_min": 15}})
+        main.speed_store.add({"ts": now - 20, "wan": "wan2", "label": "AT&T", "trigger": "on request",
+                              "state": "skipped", "error": "WAN is down"})
+        self.assertEqual(sorted(self.c.get("/api/last-check").get_json()), ["interval", "last_check"])
+        self.assertIn("/api/last-check", self.c.get("/settings/all").get_data(as_text=True))   # every page
+        for url in ("/speed", "/speed?days=365", "/speed?days=x"):
+            self.assertEqual(self.c.get(url).status_code, 200, url)
+        body = self.c.get("/speed").get_data(as_text=True)
+        for text in ("412.3", "B66: 20 MHz + N77: 100 MHz", "3.44", "88%", "DSL sync 100.0/20.0 Mbps", "WAN is down",
+                     "By carrier setup", "Speed tests"):
+            self.assertIn(text, body)
+        self.assertIn("Speed test", self.c.get("/settings/all").get_data(as_text=True))
+        with self.c.session_transaction() as sess:
+            token = sess.get("csrf")
+        r = self.c.post("/speed/run", data={"csrf": token})
+        self.assertEqual(r.status_code, 302)
+
     def test_login_redirect_stays_on_site(self):
         r = self.login("/%5Cevil.example")
         self.assertEqual(r.status_code, 302)
