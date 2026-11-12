@@ -65,6 +65,26 @@ FIELDS = {
     "vpn_max_restarts_per_day": ("VPN", "Max reconnects per day", "int", 24, 0, 96,
                                  "0 = never reconnect automatically."),
     "bounce_wait_minutes": ("Port bounce", "Wait after a bounce before the power cycle (minutes)", "int", 3, 1, 30, ""),
+    "signal_sample_minutes": ("Modem", "Read QManager's antenna history every (minutes)", "int", 25, 0, 29,
+                              "QManager keeps about 30 minutes of per-antenna readings (one every 10-15 s) in RAM; "
+                              "reading it this often keeps all of them for the Signal page (45 days). Each read also "
+                              "saves its status (temperature, carriers). It's a read from RAM, not extra AT commands. "
+                              "0 = off (only the hourly saved pages)."),
+    "modem_temp_warn": ("Modem", "Warn at (°C)", "int", 70, 40, 100,
+                        "Modem temperature (the higher of QManager's reading and the CPU sensor) for a warning on "
+                        "its card and in the log."),
+    "modem_temp_alert": ("Modem", "Alert at (°C)", "int", 75, 40, 110,
+                         "Logged as an error. Quectel's normal operating range ends near 75 °C."),
+    "modem_hot_c": ("Modem", "Check for heat slow-down from (°C)", "int", 60, 30, 100,
+                    "At or above this, fewer antennas or carriers than the modem's usual count when cooler (two "
+                    "readings in a row) is logged as a possible slow-down from heat."),
+    "poe_step_w": ("Modem", "Log a PoE draw change of at least (W)", "float", 0.5, 0, 20,
+                   "The modem port's PoE watts over 5 minutes against the 30 minutes before. A fan starting or "
+                   "stopping shows up as a step. 0 = don't log steps (the draw is still saved and charted)."),
+    "modem_ssh": ("Modem", "Read the modem's own sensors over SSH", "bool", False, None, None,
+                  "Case, board and amplifier temperatures and the supply rail, read with each saved set of modem "
+                  "pages. Needs the watchdog's key on the modem, locked to a read-only command "
+                  "(modem/install-sensors-key.sh)."),
     "capture_schedule": ("Modem logs", "Save modem logs", "schedule", "hourly", None, None,
                          "Pages are always saved before a power cycle as well."),
     "capture_keep_days": ("Modem logs", "Keep saved logs (days)", "int", 45, 1, 365, ""),
@@ -136,7 +156,8 @@ def expand(url):
     """Fill {NAME_GATEWAY} placeholders from the environment (only *_GATEWAY names, so no secret can leak
     into a URL). Unknown names are left as they are, which makes the fetch fail visibly in the log."""
     return PLACEHOLDER_RE.sub(lambda m: gateway_value(m.group(1)) or m.group(0), url)
-GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem logs", "Modem reboot", "DSL", "WANs"]
+GROUPS = ["General", "Reset rules", "Internet check", "Port bounce", "VPN", "Modem", "Modem logs", "Modem reboot",
+          "DSL", "WANs"]
 WEB_URL_RE = re.compile(r"^https?://[^\s/]+(/\S*)?$")
 MAX_BAN_URLS = 4
 
@@ -190,6 +211,16 @@ def validate(form, partial=True):
                 v = int(str(raw).strip())
             except ValueError:
                 errors.append(f"{label}: not a whole number")
+                continue
+            if (lo is not None and v < lo) or (hi is not None and v > hi):
+                errors.append(f"{label}: must be {lo} to {hi}")
+                continue
+            clean[key] = v
+        elif kind == "float":
+            try:
+                v = round(float(str(raw).strip()), 2)
+            except ValueError:
+                errors.append(f"{label}: not a number")
                 continue
             if (lo is not None and v < lo) or (hi is not None and v > hi):
                 errors.append(f"{label}: must be {lo} to {hi}")

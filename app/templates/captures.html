@@ -25,7 +25,7 @@
 <div class="card">
   <h2>Modem logs</h2>
   {% if view == "none" %}
-  <p class="muted">No modem pages are configured (CAPTURE_WAN2 in the compose file).</p>
+  <p class="muted">No modem pages are configured (a WAN's "modem pages to save" on the Settings page).</p>
   {% else %}
   <div class="tabs">
     <a href="{{ url_for('captures', wan=wan) }}" class="{{ 'on' if view == 'one' }}">By date</a>

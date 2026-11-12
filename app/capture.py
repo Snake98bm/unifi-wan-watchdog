@@ -140,6 +140,35 @@ class Capturer:
     def can_reboot(self, wan_key):
         return bool(self.reboot_hosts.get(wan_key) and self.codes_by_wan.get(wan_key))
 
+    def qm_base(self, wan_key):
+        """'https://host' when this WAN's pages are QManager ones, else None."""
+        return qmanager_base(self.urls_by_wan.get(wan_key) or [])
+
+    def qm_fetch(self, wan_key, paths):
+        """Log in to this WAN's QManager, GET each path under /cgi-bin/quecmanager/, log out. Returns {path: text}.
+        Raises PermissionError (login refused / not set) or requests errors (unreachable)."""
+        base = self.qm_base(wan_key)
+        if not base:
+            raise RuntimeError("no QManager pages for this WAN")
+        errors, out = [], {}
+        with requests.Session() as session:
+            session.verify = False
+            if not self._qm_login(session, base, wan_key, (self.auth_by_wan.get(wan_key) or ("", ""))[1], errors):
+                raise PermissionError(errors[0] if errors else "login failed")
+            try:
+                for p in paths:
+                    r = session.get(base + QM_PATH + p, timeout=self.timeout)
+                    if r.status_code == 401:
+                        raise PermissionError("QManager refused the session")
+                    r.raise_for_status()
+                    out[p] = r.text
+            finally:
+                try:
+                    session.post(base + QM_PATH + "auth/logout.sh", timeout=self.timeout)
+                except requests.RequestException:
+                    pass
+        return out
+
     def reboot(self, wan_key):
         """Reboot this WAN's modem (AT&T/Arris Device -> Restart). Raises if the host or access code is missing."""
         host = self.reboot_hosts.get(wan_key)

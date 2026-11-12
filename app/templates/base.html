@@ -1,83 +1,183 @@
+{%- set titles = {"dashboard": "Status", "modem_page": "Signal & health", "internet": "Internet", "log": "Event log",
+     "captures": "Modem logs", "captures_combined": "Modem logs", "capture_text": "Modem logs", "all_settings": "Settings",
+     "settings_from_gateway": "Settings", "diag": "Diagnostics"} -%}
+{%- set nav = [("Overview", [("dashboard", "Status", "M3 12h4l3-8 4 16 3-8h4")]),
+               ("Cellular", [("modem_page", "Signal & health", "M2 20h2v-3H2zM7 20h2v-7H7zM12 20h2V9h-2zM17 20h2V4h-2z")]),
+               ("Network", [("internet", "Internet", "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"),
+                            ("log", "Event log", "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"),
+                            ("captures", "Modem logs", "M4 5h16v4H4zM4 11h16v4H4zM4 17h16v2H4z")]),
+               ("System", [("all_settings", "Settings", "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2M18 12h2M12 4v2M12 18v2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M6.3 17.7l1.4-1.4M16.3 7.7l1.4-1.4"),
+                           ("diag", "Diagnostics", "M14 3l7 7-11 11H3v-7z")])] -%}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 {% block head %}{% endblock %}
-<title>WAN Watchdog</title>
+<title>{{ titles.get(request.endpoint, "WAN Watchdog") }} · WAN Watchdog</title>
 <style>
 :root {
-  --bg: #f6f7f9; --card: #ffffff; --text: #1d232b; --muted: #5d6875; --border: #dde1e6;
-  --up: #1f8a4c; --down: #c62f2f; --warn: #b26a00; --accent: #2f6fd6; --code: #eef1f4;
+  --bg: #fafafa; --side: #f4f4f5; --card: #ffffff; --text: #18181b; --muted: #71717a; --border: #e4e4e7;
+  --soft: #f4f4f5; --code: #f4f4f5; --ring: #a1a1aa;
+  --up: #16a34a; --down: #dc2626; --warn: #d97706; --accent: #2563eb; --info: #0891b2;
+  --up-bg: #dcfce7; --down-bg: #fee2e2; --warn-bg: #fef3c7; --accent-bg: #dbeafe;
+  --q-excellent: #16a34a; --q-good: #65a30d; --q-fair: #d97706; --q-poor: #ea580c; --q-bad: #dc2626;
+  --lte: #2563eb; --nr: #9333ea;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14181d; --card: #1d232b; --text: #e4e8ec; --muted: #9aa5b1; --border: #2f3842;
-    --up: #46c07a; --down: #ef6b6b; --warn: #e2a54a; --accent: #6f9ff0; --code: #262e37;
+    --bg: #09090b; --side: #0c0c0f; --card: #131316; --text: #fafafa; --muted: #a1a1aa; --border: #27272a;
+    --soft: #1c1c20; --code: #1c1c20; --ring: #52525b;
+    --up: #4ade80; --down: #f87171; --warn: #fbbf24; --accent: #60a5fa; --info: #22d3ee;
+    --up-bg: #14532d55; --down-bg: #7f1d1d55; --warn-bg: #78350f55; --accent-bg: #1e3a8a55;
+    --q-excellent: #4ade80; --q-good: #a3e635; --q-fair: #fbbf24; --q-poor: #fb923c; --q-bad: #f87171;
+    --lte: #60a5fa; --nr: #c084fc;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
-  padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--border); }
-header h1 { font-size: 18px; margin: 0; }
-nav { display: flex; gap: 14px; align-items: center; }
-nav a { color: var(--accent); text-decoration: none; }
-main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
-.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
-.card h2 { margin: 0 0 8px; font-size: 17px; display: flex; justify-content: space-between; align-items: center; }
-.pill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; color: #fff; text-transform: uppercase; }
-.pill.up { background: var(--up); } .pill.down { background: var(--down); }
-.pill.private { background: var(--warn); } .pill.unknown { background: var(--muted); }
-.pill.offline { background: var(--down); }
-#last-check { font-size: 13px; margin-right: auto; } #last-check.stale { color: var(--down); font-weight: 600; }
-.wan-name { font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
-.good { color: var(--up); } .bad { color: var(--down); }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
-dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
-.note { color: var(--warn); margin: 6px 0; }
-button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; }
-button.danger { border-color: var(--down); color: var(--down); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.flash { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; border: 1px solid var(--border); background: var(--card); }
-.flash.error { border-color: var(--down); color: var(--down); } .flash.ok { border-color: var(--up); color: var(--up); }
-.banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; background: var(--card); border: 1px solid var(--warn); color: var(--warn); }
-.banner.err { border-color: var(--down); color: var(--down); }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { color: var(--muted); font-weight: 600; }
-td.lvl-error, td.lvl-warn { color: var(--down); } td.lvl-action { color: var(--accent); font-weight: 600; }
-td.ts { white-space: nowrap; color: var(--muted); }
-.pill + .pill { margin-left: 4px; }
-.table-wrap { overflow-x: auto; }
-pre { background: var(--code); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); }
+/* shell */
+.shell { display: flex; min-height: 100vh; }
+.side { width: 232px; flex: none; background: var(--side); border-right: 1px solid var(--border); padding: 14px 10px;
+  display: flex; flex-direction: column; gap: 4px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 12px; }
+.brand-mark { width: 30px; height: 30px; border-radius: 8px; background: var(--text); color: var(--bg); display: grid; place-items: center; }
+.brand b { display: block; font-size: 14px; } .brand small { color: var(--muted); font-size: 12px; }
+.side h6 { margin: 12px 8px 4px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.side a.nav { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; color: var(--text);
+  text-decoration: none; font-weight: 500; }
+.side a.nav:hover { background: var(--soft); }
+.side a.nav.on { background: var(--card); box-shadow: 0 0 0 1px var(--border); }
+.side svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+.side a.nav.on svg.i { color: var(--text); }
+.side .foot { margin-top: auto; padding: 10px 8px 0; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(6px); position: sticky; top: 0; z-index: 5; }
+.topbar h1 { margin: 0; font-size: 17px; font-weight: 600; }
+.menu-btn { display: none; }
+#last-check { margin-left: auto; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+#last-check::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--up); }
+#last-check.stale { color: var(--down); font-weight: 600; } #last-check.stale::before { background: var(--down); }
+main { padding: 20px 24px 40px; width: 100%; max-width: 1280px; }
+@media (max-width: 900px) {
+  .side { position: fixed; z-index: 20; left: 0; transform: translateX(-100%); transition: transform .15s; box-shadow: 0 0 40px #0006; }
+  body.menu .side { transform: none; }
+  .menu-btn { display: inline-flex; }
+  main { padding: 16px; } .topbar { padding: 12px 16px; }
+}
+/* building blocks */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 520px) { .cards, .grid2 { grid-template-columns: 1fr; } }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; min-width: 0; }
+.card + .card, .stack > * + * { margin-top: 16px; }
+.cards > .card + .card, .grid2 > .card + .card { margin-top: 0; }
+.card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; }
+.card h2 .sub, .card .sub { font-size: 12.5px; font-weight: 400; color: var(--muted); }
+.card h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.badge, .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--soft); color: var(--text); white-space: nowrap; text-transform: none; }
+.badge::before, .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .9; }
+.badge.plain::before { display: none; }
+.pill.up, .badge.up { color: var(--up); background: var(--up-bg); border-color: transparent; }
+.pill.down, .pill.offline, .badge.down { color: var(--down); background: var(--down-bg); border-color: transparent; }
+.pill.private, .badge.warn { color: var(--warn); background: var(--warn-bg); border-color: transparent; }
+.pill.unknown, .badge.muted { color: var(--muted); }
+.badge.info { color: var(--accent); background: var(--accent-bg); border-color: transparent; }
+.wan-name { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
+.good { color: var(--up); } .bad { color: var(--down); } .warn-t { color: var(--warn); }
 .muted { color: var(--muted); }
-form.inline { display: inline; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 12px 0; }
+dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 12px 0; }
+.stat { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+.stat small { display: block; color: var(--muted); font-size: 12px; }
+.stat b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat b small { display: inline; font-size: 12px; font-weight: 500; color: var(--muted); }
+.note, .alert { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px; font-size: 13px; background: var(--warn-bg); color: var(--warn); }
+.alert.err, .note.err { background: var(--down-bg); color: var(--down); }
+.alert.info { background: var(--accent-bg); color: var(--accent); }
+.flash, .banner { padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; border: 1px solid var(--border); background: var(--card); }
+.flash.error, .banner.err { border-color: var(--down); color: var(--down); background: var(--down-bg); }
+.flash.ok { border-color: var(--up); color: var(--up); background: var(--up-bg); }
+.banner { border-color: transparent; background: var(--warn-bg); color: var(--warn); }
+button, .btn { font: inherit; font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--card); color: var(--text); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+button:hover, .btn:hover { background: var(--soft); }
+button.danger { color: var(--down); border-color: color-mix(in srgb, var(--down) 45%, var(--border)); }
+button.primary { background: var(--text); border-color: var(--text); color: var(--bg); }
+button.primary:hover { opacity: .9; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+input[type=number], input[type=text], input[type=password], input[type=date], select, textarea {
+  font: inherit; font-size: 13px; padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+input[type=checkbox] { accent-color: var(--text); width: 15px; height: 15px; vertical-align: -2px; }
 label { margin-right: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.lvl-error, td.lvl-warn { color: var(--down); } td.lvl-warn { color: var(--warn); } td.lvl-action { color: var(--accent); font-weight: 600; }
+td.ts { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+pre { background: var(--code); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; }
+form.inline { display: inline; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--soft); border: 1px solid var(--border); border-radius: 9px; flex-wrap: wrap; }
+.seg a { padding: 4px 11px; border-radius: 6px; color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500; }
+.seg a.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px #0002; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin: 0 0 16px; }
+.switch { display: inline-flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; font-size: 13px; }
+dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--text); max-width: 420px; width: calc(100% - 32px); padding: 20px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+dialog h3 { margin: 0 0 8px; font-size: 16px; text-transform: none; color: var(--text); letter-spacing: 0; }
+dialog p { margin: 6px 0; } dialog .ok { color: var(--up); } dialog .bad { color: var(--down); } dialog .warn { color: var(--warn); }
+dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+.spark { width: 100%; height: 44px; display: block; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.spark line { stroke: var(--down); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .7; }
 </style>
 </head>
 <body{% if auto_refresh is defined %} data-refresh="{{ auto_refresh }}"{% endif %}>
 {% if session.auth %}
-<header>
-  <h1>WAN Watchdog <span class="muted" style="font-size: 13px; font-weight: normal;">v{{ version }}</span></h1>
-  {% if s is defined and s %}<span id="last-check" class="muted" data-ts="{{ s.last_check or '' }}" data-interval="{{ s.cfg.check_interval }}">Last check {{ s.last_check|when }}</span>{% endif %}
-  <nav>
-    <a href="{{ url_for('dashboard') }}">Status</a>
-    <a href="{{ url_for('log') }}">Log</a>
-    <a href="{{ url_for('internet') }}">Internet</a>
-    <a href="{{ url_for('captures') }}">Modem logs</a>
-    <a href="{{ url_for('all_settings') }}">Settings</a>
-    <a href="{{ url_for('diag') }}">Diagnostics</a>
-    <form class="inline" method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>Log out</button></form>
-  </nav>
-</header>
-{% endif %}
-<main>
+<div class="shell">
+  <aside class="side" id="side">
+    <div class="brand">
+      <span class="brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V7z"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg></span>
+      <span><b>WAN Watchdog</b><small>v{{ version }}</small></span>
+    </div>
+    {% for group, items in nav %}
+      <h6>{{ group }}</h6>
+      {% for ep, label, icon in items %}
+      {% set on = request.endpoint == ep or (ep == "captures" and request.endpoint in ("captures_combined", "capture_text")) or (ep == "all_settings" and request.endpoint == "settings_from_gateway") %}
+      <a class="nav{{ ' on' if on }}" href="{{ url_for(ep) }}"><svg class="i" viewBox="0 0 24 24"><path d="{{ icon }}"/></svg>{{ label }}</a>
+      {% endfor %}
+    {% endfor %}
+    <div class="foot">
+      <span class="muted" style="font-size: 12px;">{% if s is defined and s and s.gw_version %}Gateway {{ s.gw_version.split(".v")[-1] if ".v" in s.gw_version else s.gw_version }}{% endif %}</span>
+      <form class="inline" method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>Log out</button></form>
+    </div>
+  </aside>
+  <div class="content">
+    <header class="topbar">
+      <button type="button" class="menu-btn" onclick="document.body.classList.toggle('menu')" aria-label="Menu">&#9776;</button>
+      <h1>{{ titles.get(request.endpoint, "WAN Watchdog") }}</h1>
+      {% if s is defined and s %}<span id="last-check" data-ts="{{ s.last_check or '' }}" data-interval="{{ s.cfg.check_interval }}">Last check {{ s.last_check|when }}</span>{% endif %}
+    </header>
+    <main>
 {% for cat, msg in get_flashed_messages(with_categories=true) %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
 {% block body %}{% endblock %}
-</main>
+    </main>
+  </div>
+</div>
+{% else %}
+<main style="margin: 0 auto;">{% block login %}{% endblock %}</main>
+{% endif %}
 <script>
 // "Last check" ticks every second; pages with data-refresh reload their content in place (no page reload),
 // but never while a pop-up is open, a field has focus, or the tab is hidden
@@ -90,9 +190,12 @@ label { margin-right: 14px; }
     if (!ts) { el.textContent = "Last check: not yet"; return; }
     var age = Date.now() / 1000 - ts;
     el.textContent = "Last check " + new Date(ts * 1000).toLocaleTimeString() + " (" + ago(age) + ")";
-    el.className = age > 3 * every + 15 ? "stale" : "muted";
+    el.className = age > 3 * every + 15 ? "stale" : "";
   }
   tick(); setInterval(tick, 1000);
+  document.addEventListener("click", function (e) {
+    if (document.body.classList.contains("menu") && !e.target.closest("#side, .menu-btn")) document.body.classList.remove("menu");
+  });
   var secs = parseInt(document.body.dataset.refresh || "0", 10);
   if (!secs) return;
   function busy() {

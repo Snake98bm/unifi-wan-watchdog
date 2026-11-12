@@ -5,6 +5,7 @@ Settings page and saved in /data/settings.json (see config.py).
 """
 import hmac
 import os
+import re
 import secrets
 import sys
 import threading
@@ -17,8 +18,10 @@ from waitress import serve
 
 import config
 import pages as modem_pages
+from atparse import fix_old_qcainfo
 from bounce import Bouncer
 from capture import Capturer, schedule_slot
+from modem import SSH_SENSORS, ModemSensors, ModemStore, ModemWatch
 from monitor import Monitor
 from store import Events, Probes, Settings
 from unifi import UniFi, UniFiError
@@ -74,7 +77,15 @@ if settings.data.get("settings_version", 1) < 5:   # v5: the RM520N-GL's web UI 
         lines = [ln for ln in cur.split("\n") if ln.strip() and ln.strip() not in config.TOOLKIT_PAGES]
         settings.data["capture_wan1"] = "\n".join(lines + [p for p in config.QUECTEL_PAGES if p not in lines])
     settings.data["settings_version"] = 5
-settings.set()                                  # write any newly added settings to the file
+if settings.data.get("settings_version", 1) < 6:   # v6: AT+CBC (supply voltage) with the QManager AT commands
+    cur = str(settings.data.get("capture_wan1") or "")
+    if "/quecmanager/" in cur and "AT+CBC" not in cur:
+        lines = cur.split("\n")
+        at = [i for i, ln in enumerate(lines) if ln.strip().upper().startswith("AT:AT+QTEMP")]
+        lines.insert(at[0] + 1 if at else 0, "at:AT+CBC")
+        settings.data["capture_wan1"] = "\n".join(lines)
+    settings.data["settings_version"] = 6
+settings.set()                                # write any newly added settings to the file
 cfg = config.monitor_cfg(settings.data)
 client = UniFi(UNIFI_URL, os.environ["UNIFI_API_KEY"], os.environ.get("UNIFI_SITE", "default"),
                os.environ.get("UNIFI_VERIFY_SSL", "false").lower() in ("1", "true", "yes"))
@@ -126,8 +137,14 @@ bouncer = Bouncer(os.environ.get("BOUNCE_SSH_HOST", UNIFI_URL.split("//")[-1].sp
 # Internet probes: one container per WAN on a VLAN routed out of that WAN only writes probes/<wan>.json here
 PROBE_DIR = os.environ.get("PROBE_DIR", os.path.join(DATA, "probes"))
 probe_history = Probes(os.path.join(DATA, "probes.db"))
+# Modem health (signal per antenna, temperatures, voltage, PoE draw): modem.db, the QManager sampler, the SSH sensors
+modem_store = ModemStore(os.path.join(DATA, "modem.db"), keep_days=cfg["capture_keep_days"])
+modem_sensors = ModemSensors(os.environ.get("MODEM_SSH_HOST") or config.gateway_value("QUECTEL_GATEWAY"),
+                             os.environ.get("BOUNCE_SSH_KEY", os.path.join(DATA, "ssh", "id_ed25519")),
+                             os.path.join(DATA, "ssh", "known_hosts_modem"))
+modem = ModemWatch(modem_store, events, settings, capture=capturer, sensors=modem_sensors)
 monitor = Monitor(cfg, client, events, settings, capture=capturer, bouncer=bouncer, probe_dir=PROBE_DIR,
-                  probe_history=probe_history)
+                  probe_history=probe_history, modem=modem)
 
 
 def apply_settings():
@@ -138,6 +155,7 @@ def apply_settings():
     capturer.auth_by_wan = capture_auth()
     capturer.reboot_hosts = reboot_hosts()
     capturer.keep_days = new_cfg["capture_keep_days"]
+    modem_store.keep_days = new_cfg["capture_keep_days"]
 
 app = Flask(__name__)
 app.config.update(SECRET_KEY=secret_key(), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
@@ -224,11 +242,95 @@ def logout():
     return redirect(url_for("login"))
 
 
+def spark(points, limit=None, height=30):
+    """[[ts, value], ...] -> SVG polyline points (viewBox 0 0 100 height) and the y of a limit line."""
+    pts = [(p[0], p[1]) for p in points if p[1] is not None]
+    if len(pts) < 2:
+        return None
+    t0, t1 = pts[0][0], pts[-1][0]
+    vals = [v for _, v in pts] + ([limit] if limit is not None else [])
+    lo, hi = min(vals) - 2, max(vals) + 2
+
+    def y(v):
+        return round(height - (v - lo) / (hi - lo) * height, 2)
+    line = " ".join(f"{round((t - t0) / max(1, t1 - t0) * 100, 2)},{y(v)}" for t, v in pts)
+    return {"points": line, "limit_y": y(limit) if limit is not None else None, "h": height,
+            "min": min(v for _, v in pts), "max": max(v for _, v in pts)}
+
+
+def modem_snaps():
+    out, now = {}, time.time()
+    for k in modem.qm_wans():
+        snap = modem.snapshot(k, now)
+        ser = modem_store.series(k, ["temp", "cpu_temp"], now - 86400, now, points=96)
+        merged = {}
+        for name in ("temp", "cpu_temp"):
+            for b, avg, _lo, hi in ser[name]:
+                merged[b] = max(merged.get(b, hi), hi)
+        snap["spark"] = spark(sorted(merged.items()), snap["warn"])
+        out[k] = snap
+    return out
+
+
 @app.get("/")
 @login_required
 def dashboard():
-    return render_template("dashboard.html", s=monitor.snapshot(), log=events.recent(15),
-                           schedules=config.SCHEDULES, has_capture=bool(capture_wans()))
+    return render_template("dashboard.html", s=monitor.snapshot(), log=events.recent(15), page="status",
+                           schedules=config.SCHEDULES, has_capture=bool(capture_wans()), modems=modem_snaps())
+
+
+RANGES = {"6h": 6, "24h": 24, "7d": 168, "45d": 1080}
+HEALTH_CHARTS = [
+    ("Temperature", "°C", [("temp", "QManager"), ("cpu_temp", "CPU"), ("ambient_temp", "Ambient"),
+                           ("pa_temp", "Amplifier (AT)"), ("case_temp", "Case (SSH)"), ("pa1_temp", "Amplifier 1 (SSH)"),
+                           ("pa2_temp", "Amplifier 2 (SSH)")]),
+    ("PoE power", "W", [("poe_w", "Watts")]),
+    ("PoE current", "mA", [("poe_ma", "mA")]),
+    ("PoE voltage", "V", [("poe_v", "Volts")]),
+    ("Supply voltage", "mV", [("supply_mv", "AT+CBC"), ("vph_mv", "Supply rail (SSH)")]),
+    ("Carriers and antennas", "", [("carriers", "Carriers"), ("lte_chains", "LTE antennas"),
+                                   ("nr_chains", "5G antennas")]),
+]
+
+
+@app.get("/modem")
+@login_required
+def modem_page():
+    """QManager-style signal page plus health charts for the QManager WAN. ?wan=&tab=signal|health&range="""
+    wans = modem.qm_wans()
+    s = monitor.snapshot()
+    if not wans:
+        return render_template("modem.html", s=s, page="modem", wan=None, wans=[])
+    wan = request.args.get("wan") if request.args.get("wan") in wans else wans[0]
+    tab = "health" if request.args.get("tab") == "health" else "signal"
+    rng = request.args.get("range") if request.args.get("range") in RANGES else "24h"
+    labels = {w["key"]: w["label"] for w in s["wans"]}
+    return render_template("modem.html", s=s, page="modem", wan=wan, wans=[(k, labels.get(k, k)) for k in wans],
+                           tab=tab, rng=rng, ranges=list(RANGES), hours=RANGES[rng], m=modem.snapshot(wan), charts=HEALTH_CHARTS,
+                           sensors=SSH_SENSORS)
+
+
+def _hours():
+    return RANGES.get(request.args.get("range"), 24)
+
+
+@app.get("/api/modem/<wan>/signal")
+@login_required
+def api_modem_signal(wan):
+    if wan not in modem.qm_wans():
+        abort(404)
+    now = time.time()
+    return jsonify(modem_store.signal_series(wan, now - _hours() * 3600, now))
+
+
+@app.get("/api/modem/<wan>/series")
+@login_required
+def api_modem_series(wan):
+    if wan not in config.WAN_KEYS:
+        abort(404)
+    names = [n for n in request.args.get("names", "").split(",") if re.fullmatch(r"[a-z0-9_]{1,24}", n)][:24]
+    now = time.time()
+    return jsonify(modem_store.series(wan, names, now - _hours() * 3600, now))
 
 
 @app.get("/api/status")
@@ -295,6 +397,16 @@ def set_vpn_enabled():
     return redirect(url_for("dashboard"))
 
 
+def public_key():
+    """The watchdog's SSH public key (for the modem sensors setup), or None."""
+    try:
+        with open(modem_sensors.key_file + ".pub") as f:
+            key = f.read().strip()
+        return key if re.fullmatch(r"ssh-[a-z0-9-]+ [A-Za-z0-9+/=]+( [\w@.-]+)?", key) else None
+    except OSError:
+        return None
+
+
 @app.route("/settings/all", methods=["GET", "POST"])
 @login_required
 def all_settings():
@@ -312,6 +424,7 @@ def all_settings():
                            wan_names={k: settings.data[f"{k}_label"] for k in config.WAN_KEYS},
                            defaults={k: f[3] for k, f in config.FIELDS.items()},
                            codes={k: bool(v) or k in capture_auth() for k, v in capture_codes().items()},
+                           pubkey=public_key(),
                            addresses={"UNIFI_URL": UNIFI_URL,
                                       "ATT_GATEWAY": config.expand("{ATT_GATEWAY}"),
                                       "QUECTEL_GATEWAY": config.expand("{QUECTEL_GATEWAY}")})
@@ -439,6 +552,12 @@ def capture_wans():
     return sorted((w for w in monitor.wans if capturer.has(w.key)), key=lambda w: w.key)   # WAN 1 first
 
 
+def raw_page(name, page):
+    """A saved page; QCAINFO pages from before v3.2 get their 5G rows re-labelled."""
+    raw = capturer.raw(name, page)
+    return fix_old_qcainfo(raw) if raw and "QCAINFO" in page else raw
+
+
 def nice_time(name):
     return datetime.strptime(name[:15], "%Y%m%d-%H%M%S").strftime("%H:%M:%S")
 
@@ -458,7 +577,7 @@ def captures():
     name = request.args.get("name") if request.args.get("name") in names else (names[0] if names else None)
     page_keys = [k for k, _ in (capturer.pages(name) or [])] if name else []
     page = request.args.get("page") if request.args.get("page") in page_keys else (page_keys[0] if page_keys else None)
-    body = modem_pages.clean_html(capturer.raw(name, page)) if page else ""
+    body = modem_pages.clean_html(raw_page(name, page)) if page else ""
     return render_template("captures.html", s=monitor.snapshot(), view="one", wans=wans, wan=wan, dates=dates,
                            day=day, names=[(n, nice_time(n), capturer.meta(n).get("reason", "")) for n in names],
                            name=name, page_keys=page_keys, page=page, body=body)
@@ -487,7 +606,7 @@ def captures_combined():
     page = request.args.get("page") if request.args.get("page") in page_keys else (page_keys[0] if page_keys else None)
     log = sections = columns = None
     if page:
-        with_page = [(n, capturer.raw(n, page)) for n in names]
+        with_page = [(n, raw_page(n, page)) for n in names]
         with_page = [(n, raw) for n, raw in with_page if raw]
         log = modem_pages.merge_logs(with_page)
         if log is None:
@@ -550,6 +669,29 @@ def capture_schedule():
         time.sleep(30)
 
 
+def signal_sampler():
+    """Every signal_sample_minutes: QManager's antenna history and status into modem.db (0 = off). First, the
+    numbers from the saves already on disk, so the charts reach back 45 days straight away."""
+    try:
+        n = modem.backfill()
+        if n:
+            print(f"Modem charts: read {n} saved page set(s)", flush=True)
+    except Exception as e:
+        events.add("error", None, f"Reading the saved modem pages for the charts failed: {e}")
+    time.sleep(45)
+    last = 0.0
+    while True:
+        every = int(settings.get("signal_sample_minutes") or 0) * 60
+        if every and time.time() - last >= every:
+            last = time.time()
+            for wan in modem.qm_wans():
+                try:
+                    modem.sample(wan)
+                except Exception as e:
+                    events.add("error", wan, f"Modem signal sampler failed: {e}")
+        time.sleep(20)
+
+
 def box_reboot_schedule():
     """Once a day, in the configured hour, reboot the chosen WAN's modem if its latency has crept up."""
     time.sleep(90)
@@ -574,4 +716,5 @@ if __name__ == "__main__":
     monitor.start()
     threading.Thread(target=capture_schedule, daemon=True, name="capture-schedule").start()
     threading.Thread(target=box_reboot_schedule, daemon=True, name="box-reboot").start()
+    threading.Thread(target=signal_sampler, daemon=True, name="signal-sampler").start()
     serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threads=4, ident="wan-watchdog")

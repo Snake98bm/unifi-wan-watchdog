@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block body %}
-<div class="card" style="max-width: 360px; margin: 10vh auto;">
-  <h2>WAN Watchdog</h2>
+{% block login %}
+<div class="card" style="max-width: 360px; margin: 14vh auto 0;">
+  <h2>WAN Watchdog <span class="sub">v{{ version }}</span></h2>
+  <p class="muted" style="margin: 0 0 14px;">Sign in to continue.</p>
   {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
   <form method="post">
-    <p><input type="password" name="password" placeholder="Password" autofocus required
-       style="width: 100%; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text);"></p>
-    <button class="primary" type="submit">Sign in</button>
+    <p><input type="password" name="password" placeholder="Password" autofocus required style="width: 100%;"></p>
+    <button class="primary" type="submit" style="width: 100%; justify-content: center;">Sign in</button>
   </form>
 </div>
 {% endblock %}

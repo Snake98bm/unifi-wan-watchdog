@@ -26,9 +26,16 @@ class AtParseTests(unittest.TestCase):
                          ("NOCONN", "66", "-101", "77", "16"))
 
     def test_qcainfo_temps_qmap_csq(self):
-        r = rows("AT+QCAINFO", '+QCAINFO: "PCC",2300,100,"LTE BAND 66",1,123,-101,-12,-70,10\n'
-                               '+QCAINFO: "SCC",648672,12,"NR5G BAND 77",1,345,-98,-11,0,16\nOK')
-        self.assertEqual((r["PCC band"], r["SCC 1 band"], r["SCC 1 RSRP"]), ("LTE BAND 66", "NR5G BAND 77", "-98"))
+        # NR short form as the RM520N-GL sends it (no state, no RSSI, SNR x100) and QManager's documented long form
+        r = rows("AT+QCAINFO", '+QCAINFO: "PCC",66536,100,"LTE BAND 66",1,361,-71,-9,-43,12\n'
+                               '+QCAINFO: "SCC",653952,8,"NR5G BAND 77",362,-75,-11,1450\n'
+                               '+QCAINFO: "SCC",528030,8,"NR5G BAND 41",1,262,0,0,528030,-79,-11,2244\nOK')
+        self.assertEqual((r["PCC band"], r["PCC bandwidth (MHz)"], r["PCC RSRQ"], r["PCC SINR"]),
+                         ("LTE BAND 66", "20", "-9", "12"))
+        self.assertEqual((r["SCC 1 band"], r["SCC 1 PCI"], r["SCC 1 RSRP"], r["SCC 1 RSRQ"], r["SCC 1 SINR"],
+                          r["SCC 1 bandwidth (MHz)"]), ("NR5G BAND 77", "362", "-75", "-11", "14.5", "60"))
+        self.assertNotIn("SCC 1 RSSI", r)
+        self.assertEqual((r["SCC 2 PCI"], r["SCC 2 RSRP"], r["SCC 2 RSRQ"], r["SCC 2 SINR"]), ("262", "-79", "-11", "22.4"))
         r = rows("AT+QTEMP", '+QTEMP:"modem-lte-sub6-pa1","41"\n+QTEMP:"cpuss-0-usr","55"\nOK')
         self.assertEqual(r["cpuss-0-usr"], "55")
         r = rows('AT+QMAP="WWAN"', '+QMAP: "WWAN",1,1,"IPV4","203.0.113.10"\n+QMAP: "WWAN",1,1,"IPV6","::"\nOK')

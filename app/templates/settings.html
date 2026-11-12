@@ -2,7 +2,8 @@
 {% block body %}
 <style>
 .set-cards { display: flex; flex-direction: column; gap: 16px; max-width: 900px; margin: 0 auto; }
-.set-cards .card, .set-top { max-width: 900px; margin-left: auto; margin-right: auto; }
+.set-cards .card, .set-top { max-width: 900px; width: 100%; margin-left: auto; margin-right: auto; }
+.set-cards .card + .card { margin-top: 0; }
 .set-grid { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 6px 16px; align-items: start; }
 .set-grid > * { min-width: 0; }
 .set-grid .help { grid-column: 1 / -1; margin: -2px 0 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
@@ -28,6 +29,16 @@ textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-
           onsubmit="return confirm('Forget {{ n }}\'s modem fingerprint and learn it again?');">
       <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>Re-learn</button></form></dd>{% endfor %}</dl>
 </div>
+<div class="card set-top" style="margin-bottom: 16px;">
+  <h2>Modem sensors over SSH <span class="badge {{ 'up' if values.get('modem_ssh') else 'muted' }}">{{ "on" if values.get("modem_ssh") else "off" }}</span></h2>
+  <p class="muted">Optional. Lets the watchdog read the QManager modem's own temperature sensors (case, board,
+    amplifiers) and supply rail with each saved set of pages. It uses the watchdog's SSH key, locked on the modem to a
+    single read-only command (no shell, no forwarding). Run once on the Docker host, then turn on
+    "Read the modem's own sensors over SSH" below:</p>
+  {% if pubkey %}<pre>ssh root@{{ addresses.QUECTEL_GATEWAY }} "WATCHDOG_PUBKEY='{{ pubkey }}' sh" &lt; modem/install-sensors-key.sh</pre>
+  {% else %}<p class="note">No watchdog SSH key yet (/data/ssh/id_ed25519.pub); see the README's port-bounce setup.</p>{% endif %}
+  <p class="muted">Undo: the same command with <code>sh -s remove</code>.</p>
+</div>
 <form method="post">
 <input type="hidden" name="csrf" value="{{ csrf_token() }}">
 <div class="set-cards">
@@ -40,9 +51,9 @@ textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-
       {% if kind == "bool" %}
         <label for="{{ key }}">{{ f[1] }}</label>
         <div><input type="checkbox" id="{{ key }}" name="{{ key }}" {{ "checked" if values[key] in (true, "on") }}></div>
-      {% elif kind == "int" %}
+      {% elif kind in ("int", "float") %}
         <label for="{{ key }}">{{ f[1] }}</label>
-        <div><input type="number" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" min="{{ f[4] }}" max="{{ f[5] }}" required>
+        <div><input type="number" id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" min="{{ f[4] }}" max="{{ f[5] }}"{% if kind == "float" %} step="0.1"{% endif %} required>
           <div class="default">default {{ defaults[key] }} &middot; {{ f[4] }}&ndash;{{ f[5] }}</div></div>
       {% elif kind == "aturl" %}
         <label for="{{ key }}" class="wide">{{ f[1] }}</label>

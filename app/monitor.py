@@ -14,7 +14,9 @@ Rules
   PRIVATE_MINUTES -> reset.
 - An automatic reset first BOUNCES the gateway port (link renegotiation over the restricted SSH key, modem stays
   powered) when bounce access works. If the WAN is still bad BOUNCE_WAIT_MINUTES later, the port's PoE
-  is power-cycled. Without working bounce access it goes straight to the PoE power cycle.
+  is power-cycled. Without working bounce access it goes straight to the PoE power cycle. A port that isn't
+  supplying PoE (modem unplugged, on its own 12 V supply, or PoE dropped) is never power-cycled: that's logged
+  once as a warning instead (the gateway would refuse it anyway).
 - Only ONE WAN is ever being reset: after a bounce or cycle, nothing else is touched until that WAN
   is healthy again (at least 2 minutes later) or its wait window has passed.
 - If both need a reset, the WAN listed first in WANS (AT&T) goes first.
@@ -51,6 +53,7 @@ from urllib.parse import urlparse
 
 from atparse import gateway_log_html, text_html
 from dsl import WEEK as DSL_WEEK, checks as dsl_checks, _same_boot as dsl_same_boot, _up as _dsl_up
+from modem import poe_numbers
 from pages import box_uptime, dsl_degraded, dsl_lines
 from unifi import UniFiError, is_private
 from version import VERSION
@@ -127,6 +130,7 @@ class Wan:
         # "alerts": {key: message}} for the dashboard, and the saves' samples for the checks (dsl.py)
         self.dsl = None
         self.dsl_samples = []
+        self.no_poe_logged = False        # "needs a cycle but the port gives no PoE" logged for this problem
 
     @property
     def fingerprint(self):
@@ -212,8 +216,9 @@ class Vpn:
 
 class Monitor(threading.Thread):
     def __init__(self, cfg, client, events, settings, clock=time.time, capture=None, bouncer=None,
-                 probe_dir=None, probe_history=None):
+                 probe_dir=None, probe_history=None, modem=None):
         super().__init__(daemon=True, name="wan-monitor")
+        self.modem = modem        # optional: modem.ModemWatch (PoE log, temperatures, signal)
         self.cfg, self.client, self.events, self.settings, self.clock = cfg, client, events, settings, clock
         self.capture = capture    # optional: saves a modem's pages before its port is cycled
         self.bouncer = bouncer    # optional: link bounce over the restricted SSH key
@@ -669,8 +674,12 @@ class Monitor(threading.Thread):
         w.up, w.ip = up, ip
         w.ifname = info.get("ifname") or w.ifname
         w.link = port.get("up")
-        w.poe = {"mode": port.get("poe_mode"), "enabled": port.get("poe_enable"),
-                 "power": port.get("poe_power")} if port else None
+        w.poe = poe_numbers(port)
+        if self.modem and w.poe:
+            try:
+                self.modem.poe_sample(w.key, w.label, w.port, now, w.poe)
+            except Exception as e:
+                self._error(f"saving {w.label}'s PoE reading failed: {e}")
         w.seen = True
         w.is_uplink = bool(info.get("is_uplink"))       # True = UniFi's primary (active) WAN
         w.wan_port_idx = info.get("port_idx")
@@ -699,6 +708,7 @@ class Monitor(threading.Thread):
             w.private_since = None
         if w.healthy:
             w.bounced_at = None
+            w.no_poe_logged = False
         w.bad_checks = w.bad_checks + 1 if w.state in ("down", "offline", "private") else 0
         if w.bad_checks == EVENT_CAPTURE_CHECKS and (
                 w.last_event_capture is None or now - w.last_event_capture >= EVENT_CAPTURE_EVERY):
@@ -812,10 +822,30 @@ class Monitor(threading.Thread):
             return "bounce", reason
         if w.bounced_at and now - w.bounced_at < self.cfg["bounce_wait_minutes"] * 60:
             return None, f"port bounced, waiting to see if {w.label} recovers"
+        no_poe = self.poe_problem(w)
+        if no_poe:
+            if not w.no_poe_logged:
+                self.events.add("warn", w.key, f"{w.label} needs a power cycle ({reason}) but it is SKIPPED: {no_poe}")
+                w.no_poe_logged = True
+            return None, f"needs a power cycle ({reason}) but won't: {no_poe}"
         blocked = self._blocked(w, now)
         if blocked:
             return None, f"needs a power cycle: {reason}; {blocked}"
         return "cycle", reason + (" (port bounce didn't help)" if w.bounced_at else "")
+
+    @staticmethod
+    def poe_problem(w):
+        """Why a PoE power cycle can't restart this WAN's modem (the port isn't powering it), else None.
+        Unknown PoE data is not a problem: the gateway then decides."""
+        p = w.poe
+        if not p:
+            return None
+        if p.get("enabled") is False or p.get("mode") == "off":
+            return f"PoE is off on gateway port {w.port}, so a power cycle can't restart the modem"
+        if p.get("good") is False or (p.get("power") is not None and p["power"] < 0.3):
+            return (f"the modem isn't on PoE (port {w.port} supplies {p.get('power') or 0:g} W): it is unplugged, "
+                    f"running on its own 12 V supply, or PoE dropped")
+        return None
 
     def _reserve(self, w, what, now):
         """Take the one-WAN-at-a-time slot before slow I/O starts (call with the lock held)."""
@@ -872,10 +902,13 @@ class Monitor(threading.Thread):
         if not (self.capture and self.capture.has(w.key)):
             return None
         try:
-            name, saved, errors = self.capture(w.key, why, extra=self._gateway_log(w))
+            extra = self._gateway_log(w) + (self.modem.sensor_page(w.key) if self.modem else [])
+            name, saved, errors = self.capture(w.key, why, extra=extra)
         except Exception as e:
             self.events.add("error", w.key, f"Saving {w.label} modem pages failed: {e}")
             return None
+        if name and self.modem:
+            self.modem.ingest_capture(w.key, name)
         msg = f"Saved {saved} {w.label} modem page(s) {why}" + (f" as {name}" if name else "")
         if errors:
             msg += " - not saved: " + "; ".join(errors)
@@ -1083,6 +1116,9 @@ class Monitor(threading.Thread):
                 via = self.client.power_cycle(self.gw_mac, w.port)
             except UniFiError as e:
                 error = str(e)
+                if "not-supplying-power" in error:
+                    error = (f"the gateway refused: port {w.port} isn't supplying PoE (the modem is unplugged, on "
+                             f"its own 12 V supply, or PoE dropped) - {error}")
         done = self.clock()
         with self.lock:
             self._roll_day(w)
@@ -1231,6 +1267,9 @@ class Monitor(threading.Thread):
                 return False, err
             if not self.gw_mac:
                 return False, "gateway not read yet - try again in a moment"
+            no_poe = self.poe_problem(w)
+            if no_poe:
+                return False, f"Not sent: {no_poe}"
             now = self.clock()
             self._reserve(w, "power cycle", now)
         return self._cycle(w, "requested from the web page", now, manual=True)

@@ -47,8 +47,24 @@ why the line went down.
   average. The limits are on the Settings page (DSL).
 
   Shown in the modem's own table style, by date, or merged over the last 30 days.
+- **Modem health (QManager modem):** a **Signal & health** page in QManager's style: LTE and 5G cards with the 4
+  antenna ports each (RSRP / RSRQ / SINR with coloured bars; "no signal" values such as -140 / -20 show as "—",
+  never "Poor"), and charts over 6 h to 45 days of the best antenna per technology, temperatures (QManager, CPU,
+  ambient, amplifiers), PoE watts / volts / mA, supply voltage, carriers and antennas reporting.
+  - **Antenna history:** every 25 min (setting) the watchdog reads QManager's last ~30 min of per-antenna readings
+    (`fetch_signal_history.sh`, from its RAM, no extra AT commands), so about one reading every 10-15 s is kept
+    45 days in `modem.db`. Numbers from the saves already on disk are read at start, so the charts reach back
+    right away.
+  - **Heat:** a warning (70 °C) and an alert (75 °C) on the modem's card and in the log; and, at 60 °C or more,
+    "may be slowing down from heat" when fewer antennas or carriers report than the modem's usual count when cool.
+  - **PoE draw** of the modem's port every check: charted, and a step of 0.5 W or more for 5 minutes is logged
+    (a fan starting or stopping shows up there), as is the port no longer supplying PoE.
+  - **No PoE, no power cycle:** when the modem's port isn't supplying PoE (unplugged, running on its own 12 V
+    supply, or PoE dropped), the power cycle is skipped with a clear warning instead of failing at the gateway.
+  - **The modem's own sensors (optional):** case, board and amplifier temperatures and its supply rail, read over
+    SSH with each save, see below.
 - **Web UI** with a password: status, confirmation pop-ups, event log, settings (saved in `/data`, applied
-  live), diagnostics.
+  live), diagnostics. Light and dark themes follow the browser.
 
 ## Setup
 
@@ -84,12 +100,21 @@ why the line went down.
    through the right WAN. Add a UniFi policy-based route for that address via that WAN, with the watchdog's
    network as a source.
 
+9. **Modem sensors over SSH (optional, QManager modem):** lets the watchdog read the modem's own sensors. It adds
+   the watchdog's key to the modem's root `authorized_keys`, locked to one read-only command (prints the sensor
+   files; no shell, no pty, no forwarding), and shows what the watchdog will read:
+   ```sh
+   ssh root@<modem> "WATCHDOG_PUBKEY='$(cat /docker/wan-watchdog/ssh/id_ed25519.pub)' sh" < modem/install-sensors-key.sh
+   ```
+   Then turn on "Read the modem's own sensors over SSH" (Settings, Modem). Undo with `sh -s remove`.
+
 ## Tests
 
 ```sh
-docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint python local/wan-watchdog:1 /tests/test_monitor.py
+docker run --rm -v "$PWD:/w:ro" -w /w --entrypoint python local/wan-watchdog:1 tests/test_monitor.py
 ```
-(also `test_probe`, `test_vpn`, `test_config`, `test_capture`, `test_pages`, `test_atparse`, `test_unifi`, `test_bounce`, `test_main`).
+(also `test_modem`, `test_probe`, `test_vpn`, `test_config`, `test_capture`, `test_pages`, `test_atparse`,
+`test_dsl`, `test_unifi`, `test_bounce`, `test_main`).
 
 ## Notes
 

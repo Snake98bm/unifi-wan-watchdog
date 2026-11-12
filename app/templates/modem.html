@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block head %}
+<script src="{{ url_for('static', filename='chart.js') }}?v={{ version }}"></script>
+<style>
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.ports { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; }
+.port { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg); }
+.port.off { opacity: .55; }
+.port-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.port-head b { font-size: 13.5px; }
+.chip { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border); color: var(--muted); }
+.verdict { margin-left: auto; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; }
+.q-excellent { color: var(--q-excellent); } .q-good { color: var(--q-good); } .q-fair { color: var(--q-fair); }
+.q-poor { color: var(--q-poor); } .q-bad { color: var(--q-bad); } .q-none, .q-on { color: var(--muted); }
+.verdict.q-excellent { background: color-mix(in srgb, var(--q-excellent) 16%, transparent); }
+.verdict.q-good { background: color-mix(in srgb, var(--q-good) 16%, transparent); }
+.verdict.q-fair { background: color-mix(in srgb, var(--q-fair) 16%, transparent); }
+.verdict.q-poor { background: color-mix(in srgb, var(--q-poor) 16%, transparent); }
+.verdict.q-bad { background: color-mix(in srgb, var(--q-bad) 16%, transparent); }
+.verdict.q-none, .verdict.q-on { background: var(--soft); }
+.metric { display: grid; grid-template-columns: 44px 1fr 74px; align-items: center; gap: 8px; font-size: 12.5px; margin-top: 6px; }
+.metric span:first-child { color: var(--muted); }
+.bar { height: 6px; border-radius: 4px; background: var(--soft); overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 4px; background: currentColor; }
+.metric .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.metric .val small { font-weight: 400; color: var(--muted); }
+.rat-title { display: flex; align-items: center; gap: 8px; }
+.rat-dot { width: 9px; height: 9px; border-radius: 3px; }
+.chart { min-height: 120px; }
+.ct { font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+</style>
+{% endblock %}
+{% macro qlabel(q) %}{{ {"excellent": "Excellent", "good": "Good", "fair": "Fair", "poor": "Poor", "bad": "Bad", "none": "No signal", "on": "Reporting"}[q] }}{% endmacro %}
+{% block body %}
+{% if not wan %}
+<section class="card"><h2>No QManager modem</h2>
+  <p class="muted">The Signal &amp; health page reads a Quectel modem running QManager. Add its pages (…/cgi-bin/quecmanager/…) to a WAN's "modem pages to save" on the Settings page.</p></section>
+{% else %}
+<div class="toolbar">
+  {% if wans|length > 1 %}<div class="seg">{% for k, label in wans %}<a href="{{ url_for('modem_page', wan=k, tab=tab, range=rng) }}" class="{{ 'on' if k == wan }}">{{ label }}</a>{% endfor %}</div>{% endif %}
+  <div class="seg">
+    <a href="{{ url_for('modem_page', wan=wan, tab='signal', range=rng) }}" class="{{ 'on' if tab == 'signal' }}">Signal</a>
+    <a href="{{ url_for('modem_page', wan=wan, tab='health', range=rng) }}" class="{{ 'on' if tab == 'health' }}">Health</a>
+  </div>
+  <div class="seg">{% for r in ranges %}<a href="{{ url_for('modem_page', wan=wan, tab=tab, range=r) }}" class="{{ 'on' if r == rng }}">{{ r }}</a>{% endfor %}</div>
+  <span class="muted" style="font-size: 12.5px;">{% if m.status_age is not none %}Status read {{ m.status_age|dur }} ago{% elif m.last_sample %}Sampled {{ m.last_sample|when }}{% else %}Waiting for the first QManager read{% endif %}{% if s.settings.signal_sample_minutes %} · antenna history every {{ s.settings.signal_sample_minutes }} min{% else %} · sampler off (Settings → Modem){% endif %}</span>
+</div>
+{% if m.sampler_error %}<div class="banner">Signal sampler: {{ m.sampler_error }}</div>{% endif %}
+
+{% if tab == "signal" %}
+<div class="strip">
+  <div class="stat"><small>Serving mode</small><b style="font-size: 15px;">{{ {"5G-NSA": "EN-DC (LTE + 5G)", "5G-SA": "5G SA", "LTE": "LTE"}.get(m.network.type, m.network.type or "–") }}</b></div>
+  <div class="stat"><small>Active MIMO</small><b style="font-size: 15px;">{{ m.device.mimo or "–" }}</b></div>
+  {% if m.antennas %}
+  <div class="stat"><small>LTE chains reporting</small><b style="color: var(--lte);">{{ m.antennas.lte.chains }}<small>/4</small></b></div>
+  <div class="stat"><small>5G chains reporting</small><b style="color: var(--nr);">{{ m.antennas.nr.chains }}<small>/4</small></b></div>
+  {% endif %}
+  <div class="stat"><small>Carriers</small><b style="font-size: 15px;">{{ m.network.total_bandwidth_mhz or "–" }} <small>MHz</small></b><small>{{ m.network.bandwidth_details or "" }}</small></div>
+  <div class="stat"><small>Temperature</small><b class="{{ 'bad' if m.heat == 'alert' else ('warn-t' if m.heat == 'warn' else '') }}">{{ "%.0f"|format(m.temp) if m.temp is not none else "–" }} <small>°C</small></b></div>
+</div>
+
+{% if m.antennas %}
+<div class="grid2">
+  {% for rat in ("lte", "nr") %}{% set a = m.antennas[rat] %}{% set cell = m.lte if rat == "lte" else m.nr %}
+  <section class="card">
+    <h2><span class="rat-title"><span class="rat-dot" style="background: var(--{{ rat }});"></span>{{ a.title }}</span>
+      <span class="badge {{ 'up' if a.chains == 4 else ('warn' if a.chains else 'muted') }}">{{ a.chains }}/4 reporting</span></h2>
+    <p class="sub" style="margin: 0;">{% if cell.band %}Band {{ cell.band }}{% endif %}{% if cell.pci %} · PCI {{ cell.pci }}{% endif %}{% if cell.earfcn or cell.arfcn %} · {{ "EARFCN" if rat == "lte" else "ARFCN" }} {{ cell.earfcn or cell.arfcn }}{% endif %}{% if cell.state %} · {{ cell.state }}{% endif %}</p>
+    <div class="ports">
+      {% for p in a.ports %}
+      <div class="port{{ '' if p.live else ' off' }}">
+        <div class="port-head"><b>{{ p.name }}</b><span class="chip">{{ p.rx }}</span><span class="verdict q-{{ p.verdict }}">{{ qlabel(p.verdict) }}</span></div>
+        {% for r in p.rows %}
+        <div class="metric q-{{ r.quality }}"><span>{{ r.label }}</span>
+          <span class="bar">{% if r.value is not none %}<i style="width: {{ r.pct }}%;"></i>{% endif %}</span>
+          <span class="val">{% if r.value is not none %}{{ r.value }} <small>{{ r.unit }}</small>{% else %}<span class="muted">—</span>{% endif %}</span></div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% else %}
+<section class="card"><p class="muted">No antenna readings yet. They come from QManager's status (the sampler and the hourly saves).</p></section>
+{% endif %}
+
+<section class="card" style="margin-top: 16px;">
+  <h2>Signal history <span class="sub">best antenna per technology, last {{ rng }}</span></h2>
+  <div class="grid2" style="margin-top: 8px;">
+    <div><div class="ct">RSRP <span class="muted">dBm</span></div><div class="chart" id="c-rsrp"></div></div>
+    <div><div class="ct">RSRQ <span class="muted">dB</span></div><div class="chart" id="c-rsrq"></div></div>
+    <div><div class="ct">SINR <span class="muted">dB</span></div><div class="chart" id="c-sinr"></div></div>
+    <div><div class="ct">Antennas reporting</div><div class="chart" id="c-chains"></div></div>
+  </div>
+</section>
+<script>
+(function () {
+  var until = Date.now() / 1000, since = until - {{ hours }} * 3600;
+  fetch("{{ url_for('api_modem_signal', wan=wan, range=rng) }}", {credentials: "same-origin"}).then(function (r) { return r.json(); }).then(function (d) {
+    var css = getComputedStyle(document.documentElement), lte = css.getPropertyValue("--lte").trim(), nr = css.getPropertyValue("--nr").trim();
+    [["rsrp", "dBm"], ["rsrq", "dB"], ["sinr", "dB"]].forEach(function (m) {
+      wwChart(document.getElementById("c-" + m[0]), {unit: m[1], title: m[0], from: since, to: until, series: [
+        {label: "LTE", color: lte, points: d["lte_" + m[0]]}, {label: "5G", color: nr, points: d["nr_" + m[0]]}]});
+    });
+    wwChart(document.getElementById("c-chains"), {from: since, to: until, series: [
+      {label: "LTE", color: lte, points: d.lte_chains}, {label: "5G", color: nr, points: d.nr_chains}]});
+  });
+})();
+</script>
+
+{% else %}
+<div class="strip">
+  <div class="stat"><small>Temperature{% if m.temp_source %} · {{ m.temp_source }}{% endif %}</small><b class="{{ 'bad' if m.heat == 'alert' else ('warn-t' if m.heat == 'warn' else '') }}">{{ "%.0f"|format(m.temp) if m.temp is not none else "–" }} <small>°C</small></b><small>warn {{ m.warn }} · alert {{ m.alert }}</small></div>
+  <div class="stat"><small>CPU / ambient</small><b>{{ m.latest.cpu_temp|round|int if m.latest.cpu_temp is not none else "–" }}<small> / {{ m.latest.ambient_temp|round|int if m.latest.ambient_temp is not none else "–" }} °C</small></b></div>
+  <div class="stat"><small>Case (SSH)</small><b>{{ m.latest.case_temp|round|int if m.latest.case_temp is not none else "–" }} <small>°C</small></b>{% if not s.settings.modem_ssh %}<small>off (Settings → Modem)</small>{% endif %}</div>
+  <div class="stat"><small>PoE draw</small><b>{{ "%.2f"|format(m.latest.poe_w) if m.latest.poe_w is not none else "–" }} <small>W</small></b><small>{{ "%.2f"|format(m.latest.poe_v) if m.latest.poe_v is not none else "–" }} V · {{ m.latest.poe_ma|round|int if m.latest.poe_ma is not none else "–" }} mA</small></div>
+  <div class="stat"><small>Supply voltage</small><b>{{ (m.latest.supply_mv / 1000)|round(3) if m.latest.supply_mv else "–" }} <small>V</small></b></div>
+</div>
+{% if m.heat == "alert" %}<div class="banner err">Modem is very hot ({{ "%.0f"|format(m.temp) }} °C, alert at {{ m.alert }} °C).</div>
+{% elif m.heat == "warn" %}<div class="banner">Modem is hot ({{ "%.0f"|format(m.temp) }} °C, warning at {{ m.warn }} °C).</div>{% endif %}
+{% if m.slow %}<div class="banner err">{{ m.slow }}</div>{% endif %}
+<div class="grid2">
+  {% for title, unit, names in charts %}
+  <section class="card"><h2>{{ title }} <span class="sub">last {{ rng }}{% if title == "Temperature" %}, highest per interval{% endif %}</span></h2>
+    <div class="chart" id="h-{{ loop.index }}"></div></section>
+  {% endfor %}
+</div>
+<script>
+(function () {
+  var until = Date.now() / 1000, since = until - {{ hours }} * 3600;
+  var charts = {{ charts|tojson }}, warn = {{ m.warn }}, alert = {{ m.alert }};
+  var palette = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#9333ea", "#0891b2", "#db2777"];
+  var names = [];
+  charts.forEach(function (c) { c[2].forEach(function (n) { names.push(n[0]); }); });
+  fetch("{{ url_for('api_modem_series', wan=wan, range=rng) }}&names=" + names.join(","), {credentials: "same-origin"})
+    .then(function (r) { return r.json(); }).then(function (d) {
+      charts.forEach(function (c, i) {
+        var useMax = c[0] === "Temperature";
+        wwChart(document.getElementById("h-" + (i + 1)), {unit: c[1], title: c[0], from: since, to: until,
+          limits: useMax ? [{y: warn, label: "warn " + warn, color: "var(--warn)"}, {y: alert, label: "alert " + alert}] : [],
+          series: c[2].map(function (n, j) {
+            return {label: n[1], color: palette[j % palette.length],
+                    points: (d[n[0]] || []).map(function (p) { return [p[0], useMax ? p[3] : p[1]]; })};
+          })});
+      });
+    });
+})();
+</script>
+{% endif %}
+{% endif %}
+{% endblock %}

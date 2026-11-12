@@ -19,8 +19,17 @@ QENG_LTE = ["state", "tech", "duplex", "MCC", "MNC", "cell ID", "PCI", "EARFCN",
 NSA_LTE = ["duplex", "MCC", "MNC", "cell ID", "PCI", "EARFCN", "band", "UL bandwidth", "DL bandwidth", "TAC",
            "RSRP", "RSRQ", "RSSI", "SINR", "CQI", "TX power", "srxlev"]
 NSA_NR = ["MCC", "MNC", "PCI", "RSRP", "SINR", "RSRQ", "ARFCN", "band", "DL bandwidth", "SCS"]
-QCAINFO = ["channel", "bandwidth", "band", "state", "PCI", "RSRP", "RSRQ", "RSSI", "SINR"]
+# +QCAINFO rows (QManager docs/reference/carrier-aggregation.md). LTE: bandwidth in resource blocks, SINR in dB.
+# NR has no RSSI and reports SNR x100; its short form has no state, the long form adds the uplink config.
+QCAINFO_LTE = ["channel", "bandwidth", "band", "state", "PCI", "RSRP", "RSRQ", "RSSI", "SINR"]
+QCAINFO_NR = ["channel", "bandwidth", "band", "PCI", "RSRP", "RSRQ", "SINR"]
+QCAINFO_NR_LONG = ["channel", "bandwidth", "band", "state", "PCI", "UL config", "UL bandwidth", "UL channel",
+                   "RSRP", "RSRQ", "SINR"]
+LTE_RB_MHZ = {"6": "1.4", "15": "3", "25": "5", "50": "10", "75": "15", "100": "20"}
+NR_BW_MHZ = {"0": 5, "1": 10, "2": 15, "3": 20, "4": 25, "5": 30, "6": 40, "7": 50, "8": 60, "9": 70, "10": 80,
+             "11": 90, "12": 100, "13": 200, "14": 400, "15": 35, "16": 45}
 LABELS = {"+CSQ": ["RSSI (0-31)", "BER"], "+COPS": ["mode", "format", "operator", "access tech"],
+          "+CBC": ["charge state (unused)", "battery % (fake, from the voltage)", "supply voltage (mV)"],
           "+QNWINFO": ["access tech", "operator", "band", "channel"], "+CFUN": ["radio (1 = on)"],
           "+CPIN": ["SIM"], "+QUIMSLOT": ["SIM slot"], "+CEER": ["last disconnect reason"]}
 REG = ["URC mode", "status", "TAC", "cell ID", "access tech", "cause type", "reject cause"]
@@ -81,6 +90,55 @@ def _split(rest):
     return [v.strip() for v in next(csv.reader([rest], skipinitialspace=True))]
 
 
+def qcainfo_fields(vals):
+    """One +QCAINFO row without its PCC/SCC tag -> [(field, value)], with the bandwidth in MHz and the NR SNR in
+    dB. LTE and NR rows have different columns (NR has no RSSI, no state in its short form)."""
+    band = vals[2] if len(vals) > 2 else ""
+    nr = band.upper().startswith(("NR5G", "NRDC"))
+    names = (QCAINFO_NR_LONG if len(vals) >= 8 else QCAINFO_NR) if nr else QCAINFO_LTE
+    out = []
+    for n, v in zip(names, vals):
+        if n == "bandwidth":
+            mhz = NR_BW_MHZ.get(v) if nr else LTE_RB_MHZ.get(v)
+            out.append(("bandwidth (MHz)", str(mhz) if mhz is not None else v))
+        elif n == "SINR" and nr:
+            try:
+                f = int(v)
+                v = "" if f == -32768 else f"{f / 100:.1f}"
+            except ValueError:
+                pass
+            out.append(("SINR", v))
+        else:
+            out.append((n, v))
+    return out
+
+
+QCAINFO_ROW_RE = re.compile(r"^(PCC|SCC(?: \d+)?) (.+)$")
+
+
+def fix_old_qcainfo(page_html):
+    """QCAINFO pages saved before v3.2 put NR rows in the LTE columns (5G RSRQ showing 2246). Rebuild the rows
+    from the values in their saved order; pages saved since are left alone."""
+    if "AT+QCAINFO" not in (page_html or "") or "bandwidth (MHz)" in page_html:
+        return page_html
+    cells = re.findall(r"<tr[^>]*>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*</tr>", page_html, re.S)
+    groups, order = {}, []
+    for k, v in cells:
+        m = QCAINFO_ROW_RE.match(html.unescape(k).strip())
+        if not m:
+            continue
+        tag = m.group(1)
+        if tag not in groups:
+            groups[tag] = []
+            order.append(tag)
+        groups[tag].append(html.unescape(v).strip())
+    if not order:
+        return page_html
+    lines = ["+QCAINFO: " + ",".join([t.split()[0]] + [f'"{v}"' if " " in v else v for v in groups[t]])
+             for t in order]
+    return at_html("AT+QCAINFO", lines)
+
+
 def _rows(cmd, lines):
     rows = []
     qcai_n = {}
@@ -104,7 +162,7 @@ def _rows(cmd, lines):
             kind = vals[0]                                  # PCC / SCC
             qcai_n[kind] = qcai_n.get(kind, 0) + 1
             tag = kind if kind == "PCC" else f"{kind} {qcai_n[kind]}"
-            rows += [(f"{tag} {n}", v) for n, v in zip(QCAINFO, vals[1:])]
+            rows += [(f"{tag} {n}", v) for n, v in qcainfo_fields(vals[1:])]
         elif prefix == "+QTEMP" and len(vals) >= 2:
             rows.append((vals[0], vals[1]))
         elif prefix == "+QMAP" and vals and vals[0].upper() == "WWAN":

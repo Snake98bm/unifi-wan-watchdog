@@ -327,6 +327,31 @@ class MonitorTests(unittest.TestCase):
         # window over: AT&T is next in line (its PoE cycle), Verizon still waits its turn
         self.assertEqual((self.bouncer.bounces, self.gw.cycles), (["eth0"], [1]))
 
+    def test_no_poe_on_port_skips_the_cycle(self):
+        # 2026-11-11: Verizon down, port 8 not supplying PoE (modem on its 12 V supply): UniFi refused the cycle
+        self.gw.ports[8].update(poe_enable=True, poe_mode="auto", poe_good=False, poe_power="0.00")
+        self.gw.wan["wan1"] = {"up": False, "ip": None}
+        self.clock.run(self.mon, 10)
+        self.assertEqual(self.gw.cycles, [])
+        skipped = [e["message"] for e in self.events.recent() if "SKIPPED" in e["message"]]
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("isn't on PoE (port 8 supplies 0 W)", skipped[0])
+        self.assertIn("won't", self.mon.snapshot()["wans"][0]["note"])
+        ok, msg = self.mon.manual_cycle("wan1")
+        self.assertFalse(ok)
+        self.assertIn("12 V", msg)
+        self.gw.ports[8].update(poe_good=True, poe_power="2.81")    # PoE back: the cycle goes ahead
+        self.clock.run(self.mon, 1)
+        self.assertEqual(self.gw.cycles, [8])
+
+    def test_poe_readings_reach_the_modem_watch(self):
+        seen = []
+        self.mon.modem = types.SimpleNamespace(poe_sample=lambda *a: seen.append(a))
+        self.gw.ports[8].update(poe_good=True, poe_power="2.82", poe_voltage="53.25", poe_current="53.00")
+        self.mon.check()
+        wan1 = [a for a in seen if a[0] == "wan1"][-1]
+        self.assertEqual((wan1[2], wan1[4]["power"], wan1[4]["voltage"], wan1[4]["current"]), (8, 2.82, 53.25, 53.0))
+
     def test_failed_bounce_goes_straight_to_cycle(self):
         self.with_bouncer()
         self.bouncer.works = False                    # e.g. key wiped after the hourly check

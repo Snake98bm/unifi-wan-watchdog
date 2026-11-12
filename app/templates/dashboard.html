@@ -1,145 +1,162 @@
 {% extends "base.html" %}
 {% set auto_refresh = 10 %}
-{% block head %}<noscript><meta http-equiv="refresh" content="30"></noscript>
-<style>
-dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); max-width: 400px; width: calc(100% - 32px); padding: 18px 20px; }
-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
-dialog h3 { margin: 0 0 8px; font-size: 17px; }
-dialog p { margin: 6px 0; }
-dialog .ok { color: var(--up); } dialog .bad { color: var(--down); } dialog .warn { color: var(--warn); }
-dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
-</style>{% endblock %}
+{% block head %}<noscript><meta http-equiv="refresh" content="30"></noscript>{% endblock %}
+{% macro csrf() %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endmacro %}
+{% macro f1(v) %}{{ "%.1f"|format(v) if v is not none else "–" }}{% endmacro %}
 {% block body %}
 {% if s.last_error %}<div class="banner err">{{ s.last_error }}</div>{% endif %}
-{% if s.settings.dry_run %}<div class="banner">Dry run is ON: the watchdog only logs what it would do on its own. The Bounce and Power-cycle buttons below still really act.</div>{% endif %}
+{% if s.settings.dry_run %}<div class="banner">Dry run is ON: the watchdog only logs what it would do on its own. The Bounce and Power-cycle buttons still really act.</div>{% endif %}
 {% if not s.settings.enabled %}<div class="banner">Automation is OFF: the watchdog only watches and logs.</div>{% endif %}
 {% if s.busy and s.busy.pending %}<div class="banner">{{ s.busy.label }}: {{ s.busy.what }} in progress ({{ (s.now - s.busy.since)|dur }}). Other WANs wait (one at a time).</div>
-{% elif s.busy %}<div class="banner">{{ s.busy.label }} was {{ "bounced" if s.busy.what == "bounce" else "power-cycled" }} {{ (s.now - s.busy.since)|dur }} ago. Other WANs wait up to {{ s.busy.left|dur }} (one at a time).</div>{% endif %}
+{% elif s.busy %}<div class="banner">{{ s.busy.label }}: {{ s.busy.what }} {{ (s.now - s.busy.since)|dur }} ago. Other WANs wait up to {{ s.busy.left|dur }} (one at a time).</div>{% endif %}
 
-<div class="cards">
-{% for w in s.wans %}
-  <div class="card">
-    <h2><span>{{ w.label }} <span class="wan-name">{{ w.name }}</span></span> <span class="pill {{ w.state }}">{{ w.state }}</span>{% if not w.enabled %} <span class="pill" style="background: var(--warn);">disabled</span>{% endif %}</h2>
-    <form method="post" action="{{ url_for('set_wan_enabled', key=w.key) }}" style="margin: 2px 0 6px;">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <label><input type="checkbox" name="enabled" {{ "checked" if w.enabled }} onchange="this.form.submit()"> Watchdog manages this WAN</label>
+<div class="stats" style="margin-top: 0;">
+  {% for w in s.wans %}<div class="stat"><small>{{ w.label }} <span class="wan-name">{{ w.name }}</span></small><b><span class="pill {{ w.state }}">{{ w.state }}</span></b></div>{% endfor %}
+  {% if s.vpn.configured %}<div class="stat"><small>{{ s.vpn.label }} <span class="wan-name">VPN</span></small><b><span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(s.vpn.state, 'unknown') }}">{{ s.vpn.state }}</span></b></div>{% endif %}
+  <div class="stat"><small>Automation</small><b>{% if s.settings.enabled %}<span class="badge {{ 'warn' if s.settings.dry_run else 'up' }}">{{ "dry run" if s.settings.dry_run else "on" }}</span>{% else %}<span class="badge muted">off</span>{% endif %}</b></div>
+  <div class="stat"><small>Port bounce</small><b>{% if not s.bounce.configured %}<span class="badge muted">no key</span>{% elif s.bounce.ok %}<span class="badge up">working</span>{% elif s.bounce.ok is none %}<span class="badge muted">not checked</span>{% else %}<span class="badge down">not working</span>{% endif %}</b></div>
+</div>
+
+<div class="grid2">
+{% for w in s.wans %}{% set m = modems.get(w.key) %}
+  <section class="card">
+    <h2><span>{{ w.label }} <span class="wan-name">{{ w.name }}</span></span>
+      <span><span class="pill {{ w.state }}">{{ w.state }}</span>{% if not w.enabled %} <span class="badge warn">not managed</span>{% endif %}</span></h2>
+    <form method="post" action="{{ url_for('set_wan_enabled', key=w.key) }}">{{ csrf() }}
+      <label class="switch"><input type="checkbox" name="enabled" {{ "checked" if w.enabled }} onchange="this.form.submit()"> Watchdog manages this WAN</label>
     </form>
-    {% if not w.enabled %}<p class="note" style="color: var(--warn);">Not managed &mdash; shown for reference, but the watchdog won't act on it or alert.</p>{% endif %}
+    <div class="stats">
+      <div class="stat"><small>Public IP</small><b style="font-size: 14px;">{{ w.ip or "none" }}</b></div>
+      <div class="stat"><small>Port {{ w.port }}{% if w.ifname %} · {{ w.ifname }}{% endif %}</small><b style="font-size: 14px;">{{ "link up" if w.link else ("link down" if w.link is not none else "?") }}</b></div>
+      <div class="stat"><small>PoE</small><b>{% if w.poe and w.poe.power is not none %}{{ "%.2f"|format(w.poe.power) }} <small>W</small>{% else %}–{% endif %}</b></div>
+      {% if w.probe_verdict != "off" %}<div class="stat"><small>Internet</small><b style="font-size: 14px;">{% if w.probe_verdict == "ok" %}<span class="good">OK</span>{% elif w.probe_verdict == "fail" %}<span class="bad">no reply</span>{% elif w.probe_verdict == "wrong-path" %}<span class="bad">wrong path</span>{% elif w.probe_verdict == "none" %}<span class="muted">no probe</span>{% else %}<span class="muted">{{ w.probe_verdict }}</span>{% endif %}</b></div>{% endif %}
+    </div>
+    {% if not w.enabled %}<p class="note">Not managed: shown for reference, but the watchdog won't act on it or alert.</p>{% endif %}
+
+    {% if m %}
+    <h3 style="display: flex; justify-content: space-between;">Modem <a href="{{ url_for('modem_page', wan=w.key) }}" style="text-transform: none; letter-spacing: 0; font-weight: 500;">Signal &amp; health &rarr;</a></h3>
+    <div class="stats" style="margin-top: 0;">
+      <div class="stat"><small>Temperature{% if m.temp_source %} · {{ m.temp_source }}{% endif %}</small>
+        <b class="{{ 'bad' if m.heat == 'alert' else ('warn-t' if m.heat == 'warn' else '') }}">{{ "%.0f"|format(m.temp) if m.temp is not none else "–" }} <small>°C</small></b>
+        {% if m.spark %}<svg class="spark" viewBox="0 0 100 {{ m.spark.h }}" preserveAspectRatio="none" aria-label="Last 24 hours, {{ m.spark.min|round|int }} to {{ m.spark.max|round|int }} °C"><polyline points="{{ m.spark.points }}"/>{% if m.spark.limit_y is not none %}<line x1="0" x2="100" y1="{{ m.spark.limit_y }}" y2="{{ m.spark.limit_y }}"/>{% endif %}</svg><small>24 h: {{ m.spark.min|round|int }}–{{ m.spark.max|round|int }} °C</small>{% endif %}</div>
+      <div class="stat"><small>PoE draw</small><b>{{ "%.2f"|format(m.latest.poe_w) if m.latest.poe_w is not none else "–" }} <small>W</small></b>
+        <small>{{ f1(m.latest.poe_v) }} V · {{ m.latest.poe_ma|round|int if m.latest.poe_ma is not none else "–" }} mA</small></div>
+      <div class="stat"><small>Supply voltage</small><b>{{ (m.latest.supply_mv / 1000)|round(2) if m.latest.supply_mv else "–" }} <small>V</small></b>{% if m.latest.case_temp is not none %}<small>case {{ m.latest.case_temp|round|int }} °C</small>{% endif %}</div>
+      {% if m.antennas %}<div class="stat"><small>Antennas</small><b style="font-size: 14px;"><span style="color: var(--lte);">LTE {{ m.antennas.lte.chains }}/4</span> · <span style="color: var(--nr);">5G {{ m.antennas.nr.chains }}/4</span></b>
+        <small>{{ m.network.type or "" }}{% if m.network.bandwidth_details %} · {{ m.network.bandwidth_details }}{% endif %}</small></div>{% endif %}
+    </div>
+    {% if m.heat == "alert" %}<p class="note err">&#9888; Modem is very hot ({{ "%.0f"|format(m.temp) }} °C, alert at {{ m.alert }} °C).</p>
+    {% elif m.heat == "warn" %}<p class="note">&#9888; Modem is hot ({{ "%.0f"|format(m.temp) }} °C, warning at {{ m.warn }} °C).</p>{% endif %}
+    {% if m.slow %}<p class="note err">&#9888; {{ m.slow }}</p>{% endif %}
+    {% if m.sampler_error %}<p class="note">Signal sampler: {{ m.sampler_error }}</p>{% endif %}
+    {% endif %}
+
     <dl>
-      <dt>IP</dt><dd>{{ w.ip or "none" }}</dd>
-      <dt>Gateway port</dt><dd>{{ w.port }}{% if w.ifname %} ({{ w.ifname }}){% endif %} &middot; link {{ "up" if w.link else ("down" if w.link is not none else "?") }}</dd>
-      <dt>PoE</dt><dd>{% if w.poe %}{{ w.poe.mode or "?" }}{% if w.poe.power %}, {{ w.poe.power }} W{% endif %}{% else %}?{% endif %}</dd>
-      {% if w.probe_verdict != "off" %}<dt>Internet</dt><dd>{% if w.probe_verdict == "ok" %}<span class="good">OK</span>{% elif w.probe_verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif w.probe_verdict == "wrong-path" %}<span class="bad">WRONG PATH</span>{% else %}{{ w.probe_verdict }}{% endif %}
-        &middot; {{ w.probe_note }}{% if w.probe and w.probe.ip %} <span class="muted">(probe {{ w.probe.ip }}{% if w.probe_age is not none %}, {{ w.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>{% endif %}
+      {% if w.probe_verdict != "off" %}<dt>Probe</dt><dd>{{ w.probe_note }}{% if w.probe and w.probe.ip %} <span class="muted">({{ w.probe.ip }}{% if w.probe_age is not none %}, {{ w.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>{% endif %}
       {% if w.down_for is not none %}<dt>{{ "No internet for" if w.state == "offline" else "Down for" }}</dt><dd>{{ w.down_for|dur }} (reset after {{ s.cfg.down_minutes }} min)</dd>{% endif %}
       {% if w.private_for is not none %}<dt>Private for</dt><dd>{{ w.private_for|dur }} (cycle after {{ s.cfg.private_minutes }} min)</dd>{% endif %}
       <dt>Last bounce</dt><dd>{{ w.last_bounce|when }}</dd>
-      <dt>Last cycle</dt><dd>{{ w.last_cycle|when }}</dd>
-      <dt>Cycles today</dt><dd>{{ w.cycles_today }} of {{ s.cfg.max_cycles_per_day }}</dd>
-      {% if s.box_reboot.on and s.box_reboot.wan == w.key %}<dt>Modem auto-reboot</dt><dd>{% if not s.box_reboot.wan_enabled %}<span class="muted">paused &mdash; this WAN is disabled</span>{% elif s.box_reboot.can %}watching &middot; reboots at {{ "%02d:00"|format(s.box_reboot.hour) }}{% if s.box_reboot.threshold %} if the last hour averages &ge; {{ s.box_reboot.threshold }} ms{% else %} every day{% endif %}{% if s.box_reboot.recent_ms is not none %} <span class="muted">(last hour {{ s.box_reboot.recent_ms }} ms)</span>{% endif %}{% else %}<span style="color: var(--down);">on, but no modem address or access code</span>{% endif %}</dd>{% endif %}
-      {% if w.dsl %}<dt>DSL lines</dt><dd>{% for ln in w.dsl.lines %}{{ ln.line }} {% if ln.state|lower == "up" %}<span class="good">Up</span>{% if ln.down %} {{ "%.1f"|format(ln.down / 1000) }}/{{ "%.1f"|format((ln.up or 0) / 1000) }} Mbps{% endif %}{% if ln.ds_max %} <span class="muted">(max {{ "%.1f"|format(ln.ds_max / 1000) }}/{{ "%.1f"|format((ln.us_max or 0) / 1000) }})</span>{% endif %}{% else %}<span class="bad">{{ ln.state or "?" }}</span>{% endif %}{% if not loop.last %} &middot; {% endif %}{% endfor %}{% if w.dsl.age is not none %} <span class="muted">(last save {{ w.dsl.age|dur }} ago)</span>{% endif %}</dd>{% endif %}
-      <dt>Safety checks</dt><dd>{% if w.problems %}<span style="color: var(--down);">FAILING</span>{% elif w.port_ifname %}<span style="color: var(--up);">OK</span> &middot; port {{ w.port }} = {{ w.port_ifname }} on {{ (w.port_network or "?")|upper }}{% if w.fingerprint %}, {{ w.fingerprint.values()|join(", ") }}{% endif %}{% else %}?{% endif %}</dd>
+      <dt>Last cycle</dt><dd>{{ w.last_cycle|when }} <span class="muted">· {{ w.cycles_today }} of {{ s.cfg.max_cycles_per_day }} today</span></dd>
+      {% if s.box_reboot.on and s.box_reboot.wan == w.key %}<dt>Auto-reboot</dt><dd>{% if not s.box_reboot.wan_enabled %}<span class="muted">paused (this WAN is not managed)</span>{% elif s.box_reboot.can %}reboots at {{ "%02d:00"|format(s.box_reboot.hour) }}{% if s.box_reboot.threshold %} if the last hour averages &ge; {{ s.box_reboot.threshold }} ms{% else %} every day{% endif %}{% if s.box_reboot.recent_ms is not none %} <span class="muted">(last hour {{ s.box_reboot.recent_ms }} ms)</span>{% endif %}{% else %}<span class="bad">on, but no modem address or access code</span>{% endif %}</dd>{% endif %}
+      {% if w.dsl %}<dt>DSL pairs</dt><dd>{% for ln in w.dsl.lines %}{{ ln.line }} {% if ln.state|lower == "up" %}<span class="good">up</span>{% if ln.down %} {{ "%.1f"|format(ln.down / 1000) }}/{{ "%.1f"|format((ln.up or 0) / 1000) }} Mbps{% endif %}{% if ln.ds_max %} <span class="muted">(max {{ "%.1f"|format(ln.ds_max / 1000) }}/{{ "%.1f"|format((ln.us_max or 0) / 1000) }})</span>{% endif %}{% else %}<span class="bad">{{ ln.state or "?" }}</span>{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if w.dsl.age is not none %} <span class="muted">· saved {{ w.dsl.age|dur }} ago</span>{% endif %}</dd>{% endif %}
+      <dt>Safety checks</dt><dd>{% if w.problems %}<span class="bad">failing</span>{% elif w.port_ifname %}<span class="good">OK</span> <span class="muted">· port {{ w.port }} = {{ w.port_ifname }} on {{ (w.port_network or "?")|upper }}{% if w.fingerprint %}, {{ w.fingerprint.values()|join(", ") }}{% endif %}</span>{% else %}?{% endif %}</dd>
     </dl>
-    {% if w.dsl and w.dsl.down %}<p class="note" style="color: var(--down);">&#9888; Bonded DSL degraded: {{ w.dsl.down|join(" and ") }} {{ "is" if w.dsl.down|length == 1 else "are" }} down{% if w.dsl.since %} since {{ w.dsl.since|when }}{% endif %}, so the line is running on the other pair only. Check that pair's wiring or call AT&amp;T.{% if not w.dsl.confirmed %} <span class="muted">(seen in one save so far; checked again on the next one)</span>{% endif %}</p>{% endif %}
-    {% if w.dsl and w.dsl.alerts %}{% for msg in w.dsl.alerts.values() %}<p class="note" style="color: var(--down);">&#9888; {{ msg }}</p>{% endfor %}{% endif %}
-    {% if w.problems %}<p class="note" style="color: var(--down);">Won't touch this port: {{ w.problems|join("; ") }}</p>{% endif %}
+    {% if w.dsl and w.dsl.down %}<p class="note err">&#9888; Bonded DSL degraded: {{ w.dsl.down|join(" and ") }} {{ "is" if w.dsl.down|length == 1 else "are" }} down{% if w.dsl.since %} since {{ w.dsl.since|when }}{% endif %}, running on the other pair only. Check that pair's wiring or call AT&amp;T.{% if not w.dsl.confirmed %} <span class="muted">(seen in one save so far)</span>{% endif %}</p>{% endif %}
+    {% if w.dsl and w.dsl.alerts %}{% for msg in w.dsl.alerts.values() %}<p class="note err">&#9888; {{ msg }}</p>{% endfor %}{% endif %}
+    {% if w.problems %}<p class="note err">Won't touch this port: {{ w.problems|join("; ") }}</p>{% endif %}
     {% if w.note and not w.problems %}<p class="note">{{ w.note }}</p>{% endif %}
-    <p style="display: flex; flex-wrap: wrap; gap: 8px;">
-      {% if s.bounce.ok %}<button type="button" onclick="document.getElementById('dlg-bounce-{{ w.key }}').showModal()">Bounce {{ w.label }} port&hellip;</button>{% endif %}
-      <button type="button" class="danger" onclick="document.getElementById('dlg-cycle-{{ w.key }}').showModal()">Power-cycle {{ w.label }}&hellip;</button>
-    </p>
+
+    <div class="actions">
+      {% if s.bounce.ok %}<button type="button" onclick="document.getElementById('dlg-bounce-{{ w.key }}').showModal()">Bounce port&hellip;</button>{% endif %}
+      <button type="button" class="danger" onclick="document.getElementById('dlg-cycle-{{ w.key }}').showModal()">Power-cycle&hellip;</button>
+      {% if w.key in s.capture_keys %}<form method="post" action="{{ url_for('capture_now', key=w.key) }}" class="inline">{{ csrf() }}<button title="Also saved {{ s.settings.capture_schedule }} and before every power cycle">Save modem logs now</button></form>{% endif %}
+    </div>
     {% for action in (["bounce", "cycle"] if s.bounce.ok else ["cycle"]) %}
     <dialog id="dlg-{{ action }}-{{ w.key }}">
       <h3>{{ "Bounce " ~ w.label ~ " port?" if action == "bounce" else "Power-cycle " ~ w.label ~ "?" }}</h3>
-      <p>{% if action == "bounce" %}Port {{ w.port }} link drops a few seconds; modem stays on.
-         {% else %}Cuts PoE on port {{ w.port }}{% if w.poe and w.poe.power %} ({{ w.poe.power }} W){% endif %}; modem restarts.{% endif %}</p>
+      <p>{% if action == "bounce" %}Port {{ w.port }} link drops a few seconds; the modem stays on.
+         {% else %}Cuts PoE on port {{ w.port }}{% if w.poe and w.poe.power %} ({{ "%.2f"|format(w.poe.power) }} W){% endif %}; the modem restarts.{% endif %}</p>
       {% if w.problems %}<p class="bad">&#10007; {{ w.problems|join("; ") }}</p>
       {% else %}<p class="ok">&#10003; Port and modem checks OK</p>{% endif %}
+      {% if action == "cycle" and w.poe and (w.poe.good is false or (w.poe.power is not none and w.poe.power < 0.3)) %}<p class="bad">&#10007; Port {{ w.port }} isn't supplying PoE: the modem is unplugged, on its own 12 V supply, or PoE dropped. This will be refused.</p>{% endif %}
       {% if w.is_uplink %}<p class="warn">&#9888; Primary WAN: connections will drop.</p>{% endif %}
       {% for o in s.wans if o.key != w.key and o.state != "up" %}<p class="warn">&#9888; {{ o.label }} is {{ o.state }}: you may lose internet.</p>{% endfor %}
       {% if s.busy %}<p class="warn">&#9888; {{ s.busy.label }} still recovering: this will be refused.</p>{% endif %}
-      <form method="post" action="{{ url_for('bounce' if action == 'bounce' else 'cycle', key=w.key) }}" class="row">
-        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <form method="post" action="{{ url_for('bounce' if action == 'bounce' else 'cycle', key=w.key) }}" class="row">{{ csrf() }}
         <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
         {% if not w.problems %}<button class="danger">{{ "Bounce" if action == "bounce" else "Power-cycle" }}</button>{% endif %}
       </form>
     </dialog>
     {% endfor %}
-    {% if w.key in s.capture_keys %}
-    <form method="post" action="{{ url_for('capture_now', key=w.key) }}" style="margin-top: 8px;">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <button>Save {{ w.label }} modem logs now</button>
-    </form>
-    <p class="muted">Also saved before every power cycle.</p>
-    {% endif %}
-  </div>
+  </section>
 {% endfor %}
+
 {% if s.vpn.configured %}{% set v = s.vpn %}
-  <div class="card">
-    <h2><span>{{ v.label }} <span class="wan-name">VPN</span></span> <span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(v.state, 'unknown') }}">{{ v.state }}</span>{% if not s.settings.vpn_check %} <span class="pill" style="background: var(--warn);">disabled</span>{% endif %}</h2>
-    <form method="post" action="{{ url_for('set_vpn_enabled') }}" style="margin: 2px 0 6px;">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <label><input type="checkbox" name="enabled" {{ "checked" if s.settings.vpn_check }} onchange="this.form.submit()"> Watch and reconnect the VPN</label>
+  <section class="card">
+    <h2><span>{{ v.label }} <span class="wan-name">VPN</span></span>
+      <span><span class="pill {{ {'up': 'up', 'offline': 'offline', 'banned': 'down', 'leak': 'down'}.get(v.state, 'unknown') }}">{{ v.state }}</span>{% if not s.settings.vpn_check %} <span class="badge warn">not watched</span>{% endif %}</span></h2>
+    <form method="post" action="{{ url_for('set_vpn_enabled') }}">{{ csrf() }}
+      <label class="switch"><input type="checkbox" name="enabled" {{ "checked" if s.settings.vpn_check }} onchange="this.form.submit()"> Watch and reconnect the VPN</label>
     </form>
-    {% if not s.settings.vpn_check %}<p class="note" style="color: var(--warn);">Not watched &mdash; shown for reference, but the watchdog won't reconnect it or alert.</p>{% endif %}
+    <div class="stats">
+      <div class="stat"><small>Exit IP</small><b style="font-size: 14px;">{{ v.exit_ip or "?" }}</b></div>
+      <div class="stat"><small>Internet</small><b style="font-size: 14px;">{% if v.verdict == "ok" %}<span class="good">OK</span>{% elif v.verdict == "fail" %}<span class="bad">no reply</span>{% elif v.verdict == "banned" %}<span class="bad">banned</span>{% elif v.verdict == "leak" %}<span class="bad">not through the VPN</span>{% else %}{{ v.verdict }}{% endif %}</b></div>
+      <div class="stat"><small>Reconnects today</small><b>{{ v.restarts_today }} <small>of {{ s.settings.vpn_max_restarts_per_day }}</small></b></div>
+    </div>
+    {% if not s.settings.vpn_check %}<p class="note">Not watched: shown for reference, but the watchdog won't reconnect it or alert.</p>{% endif %}
     <dl>
-      <dt>Exit IP</dt><dd>{{ v.exit_ip or "?" }}</dd>
-      <dt>Internet</dt><dd>{% if v.verdict == "ok" %}<span class="good">OK</span>{% elif v.verdict == "fail" %}<span class="bad">NO REPLY</span>{% elif v.verdict == "banned" %}<span class="bad">BANNED</span>{% elif v.verdict == "leak" %}<span class="bad">NOT THROUGH THE VPN</span>{% else %}{{ v.verdict }}{% endif %}
-        &middot; {{ v.note }}{% if v.probe and v.probe.ip %} <span class="muted">(probe {{ v.probe.ip }}{% if v.probe_age is not none %}, {{ v.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>
-      <dt>Ban check</dt><dd>{% if v.ban %}{% for site in v.ban.sites %}<div>{% if site.banned %}<span class="bad">BANNED</span>{% elif site.banned is none %}<span class="muted">couldn't check</span>{% else %}<span class="good">OK</span>{% endif %} {{ site.url }} <span class="muted">{{ site.detail }}</span></div>{% endfor %}<span class="muted">checked {{ v.ban.ts|when }}, every {{ s.settings.vpn_ban_minutes }} min</span>{% else %}<span class="muted">no sites set (Settings) or not checked yet</span>{% endif %}</dd>
+      <dt>Probe</dt><dd>{{ v.note }}{% if v.probe and v.probe.ip %} <span class="muted">({{ v.probe.ip }}{% if v.probe_age is not none %}, {{ v.probe_age|dur }} ago{% endif %})</span>{% endif %}</dd>
+      <dt>Ban check</dt><dd>{% if v.ban %}{% for site in v.ban.sites %}<div>{% if site.banned %}<span class="bad">banned</span>{% elif site.banned is none %}<span class="muted">couldn't check</span>{% else %}<span class="good">OK</span>{% endif %} {{ site.url }} <span class="muted">{{ site.detail }}</span></div>{% endfor %}<span class="muted">checked {{ v.ban.ts|when }}, every {{ s.settings.vpn_ban_minutes }} min</span>{% else %}<span class="muted">no sites set (Settings) or not checked yet</span>{% endif %}</dd>
       {% if v.offline_for is not none %}<dt>No internet for</dt><dd>{{ v.offline_for|dur }} (reconnect after {{ s.settings.vpn_down_minutes }} min)</dd>{% endif %}
       <dt>Tunnel</dt><dd>{{ v.iface or "not set" }}</dd>
       <dt>Last reconnect</dt><dd>{{ v.last_restart|when }}</dd>
-      <dt>Reconnects today</dt><dd>{{ v.restarts_today }} of {{ s.settings.vpn_max_restarts_per_day }}</dd>
     </dl>
     {% if v.action_note %}<p class="note">{{ v.action_note }}</p>{% endif %}
     {% if v.iface and s.bounce.ok %}
-    <p><button type="button" class="danger" onclick="document.getElementById('dlg-vpn').showModal()">Reconnect {{ v.label }}&hellip;</button></p>
+    <div class="actions"><button type="button" class="danger" onclick="document.getElementById('dlg-vpn').showModal()">Reconnect&hellip;</button></div>
     <dialog id="dlg-vpn">
       <h3>Reconnect {{ v.label }}?</h3>
       <p>OpenVPN {{ v.iface }} drops and reconnects (usually a new exit IP). Traffic on the VPN networks stops for a few seconds; the kill switch keeps it off the WANs.</p>
       {% if v.restarting %}<p class="warn">&#9888; A reconnect is already running: this will be refused.</p>{% endif %}
-      <form method="post" action="{{ url_for('vpn_restart') }}" class="row">
-        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <form method="post" action="{{ url_for('vpn_restart') }}" class="row">{{ csrf() }}
         <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
         <button class="danger">Reconnect</button>
       </form>
     </dialog>
     {% endif %}
-  </div>
+  </section>
 {% endif %}
-  <div class="card">
+
+  <section class="card">
     <h2>Port bounce
-      {% if not s.bounce.configured %}<span class="pill unknown">no key</span>
-      {% elif s.bounce.ok %}<span class="pill up">working</span>
-      {% elif s.bounce.ok is none %}<span class="pill unknown">not checked</span>
-      {% else %}<span class="pill down">not working</span>{% endif %}</h2>
-    <p class="muted">Automation bounces first (link down 5 s, modem stays on), then PoE-cycles if still bad after
-      {{ s.cfg.bounce_wait_minutes }} min. Access checked at startup and after firmware updates.</p>
+      {% if not s.bounce.configured %}<span class="badge muted">no key</span>
+      {% elif s.bounce.ok %}<span class="badge up">working</span>
+      {% elif s.bounce.ok is none %}<span class="badge muted">not checked</span>
+      {% else %}<span class="badge down">not working</span>{% endif %}</h2>
+    <p class="sub">Automation bounces first (link down 5 s, modem stays on), then PoE-cycles if still bad after
+      {{ s.cfg.bounce_wait_minutes }} min. Access is checked at startup and after firmware updates.</p>
     <dl>
       <dt>Gateway firmware</dt><dd>{{ s.gw_version or "?" }}</dd>
-      <dt>Last check</dt><dd>{{ s.bounce.checked|when }}</dd>
+      <dt>Checked</dt><dd>{{ s.bounce.checked|when }}</dd>
       <dt>Result</dt><dd>{{ s.bounce.detail }}</dd>
     </dl>
     {% if s.bounce.configured and not s.bounce.ok %}<p class="note">Run gateway/install-bounce.sh on the Dream Machine to (re)enable it. Until then problems go straight to the PoE power cycle.</p>{% endif %}
-    <form method="post" action="{{ url_for('bounce_check') }}" style="display: inline;">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <button>Check now</button>
-    </form>
-    {% if "host key changed" in (s.bounce.detail or "") %}
-    <form method="post" action="{{ url_for('bounce_forget_host_key') }}" style="display: inline;"
-          onsubmit="return confirm('Forget the stored gateway SSH host key and trust the gateway\'s current key?');">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <button class="danger">Forget gateway host key</button>
-    </form>
-    {% endif %}
-  </div>
-  <div class="card">
-    <h2>Settings</h2>
-    <form method="post" action="{{ url_for('update_settings') }}">
-      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-      <p><label><input type="checkbox" name="enabled" {{ "checked" if s.settings.enabled }}> Automation</label>
-         <label><input type="checkbox" name="dry_run" {{ "checked" if s.settings.dry_run }}> Dry run</label></p>
+    <div class="actions">
+      <form method="post" action="{{ url_for('bounce_check') }}" class="inline">{{ csrf() }}<button>Check now</button></form>
+      {% if "host key changed" in (s.bounce.detail or "") %}
+      <form method="post" action="{{ url_for('bounce_forget_host_key') }}" class="inline"
+            onsubmit="return confirm('Forget the stored gateway SSH host key and trust the gateway\'s current key?');">{{ csrf() }}
+        <button class="danger">Forget gateway host key</button>
+      </form>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Quick settings <a href="{{ url_for('all_settings') }}" class="sub">All settings &rarr;</a></h2>
+    <form method="post" action="{{ url_for('update_settings') }}">{{ csrf() }}
+      <p><label class="switch"><input type="checkbox" name="enabled" {{ "checked" if s.settings.enabled }}> Automation</label>
+         <label class="switch"><input type="checkbox" name="dry_run" {{ "checked" if s.settings.dry_run }}> Dry run</label></p>
       {% if has_capture %}
       <p><label>Save modem logs
         <select name="capture_schedule">
@@ -148,18 +165,17 @@ dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 1
       {% endif %}
       <button class="primary">Save</button>
     </form>
-    <p class="muted">Only one WAN is reset at a time; if both need it, {{ s.first_label }} goes first.
+    <p class="sub" style="margin-top: 12px;">One WAN is reset at a time; if both need it, {{ s.first_label }} goes first.
       Acts after {{ s.cfg.down_minutes }} min down{% if s.settings.probe_check %} or without internet{% endif %}, or {{ s.cfg.private_minutes }} min on a private IP.
-      Cooldown {{ s.cfg.cooldown_minutes }} min, recovery window {{ s.cfg.recovery_minutes }} min.
-      Last check: {{ s.last_check|when }}. <a href="{{ url_for('all_settings') }}">All settings</a></p>
-  </div>
+      Cooldown {{ s.cfg.cooldown_minutes }} min, recovery window {{ s.cfg.recovery_minutes }} min.</p>
+  </section>
 </div>
 
-<div class="card" style="margin-top: 16px;">
-  <h2>Recent events <a href="{{ url_for('log') }}" style="font-size: 14px; font-weight: normal;">full log</a></h2>
+<section class="card" style="margin-top: 16px;">
+  <h2>Recent events <a href="{{ url_for('log') }}" class="sub">Full log &rarr;</a></h2>
   <div class="table-wrap"><table>
     {% for e in log %}<tr><td class="ts">{{ e.ts|when }}</td><td class="lvl-{{ e.level }}">{{ e.level }}</td><td>{{ e.message }}</td></tr>
     {% else %}<tr><td class="muted">No events yet.</td></tr>{% endfor %}
   </table></div>
-</div>
+</section>
 {% endblock %}
