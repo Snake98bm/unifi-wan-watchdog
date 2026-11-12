@@ -1,6 +1,6 @@
 /* Tiny SVG line charts for the Signal & health page (no libraries, works offline).
    wwChart(el, {series: [{label, color, points: [[ts, value], ...]}], unit, limits: [{y, label, color}]})
-   Lines break across gaps longer than 3 buckets; hovering shows every series' value at that time. */
+   Lines connect unless readings are more than 2.5 h apart (a real hole); hovering shows every series at that time. */
 (function () {
   var NS = "http://www.w3.org/2000/svg";
   function mk(tag, attrs, parent) {
@@ -46,6 +46,9 @@
     var ys = niceStep(v1 - v0, 4); v0 = Math.floor(v0 / ys) * ys; v1 = Math.ceil(v1 / ys) * ys;
     if (t0 === t1) { t0 -= 60; t1 += 60; }
     if (!isFinite(step)) step = (t1 - t0);
+    // a line breaks only at a real hole: more than 2.5 h without a reading (hourly saves are 1 h apart), or
+    // 3.5x the usual spacing when the data is sparser than that
+    var gap = Math.max(step * 3.5, 9000);
     var X = function (t) { return L + (t - t0) / (t1 - t0) * (W - L - R); };
     var Y = function (v) { return T + (v1 - v) / (v1 - v0) * (H - T - B); };
     var svg = mk("svg", {viewBox: "0 0 " + W + " " + H, width: "100%", height: H, role: "img",
@@ -73,8 +76,8 @@
     series.forEach(function (s) {
       var d = "", prev = null, pts = s.points;
       pts.forEach(function (p, i) {
-        var gapBefore = prev === null || p[0] - prev > step * 3.5;
-        var gapAfter = i === pts.length - 1 || pts[i + 1][0] - p[0] > step * 3.5;
+        var gapBefore = prev === null || p[0] - prev > gap;
+        var gapAfter = i === pts.length - 1 || pts[i + 1][0] - p[0] > gap;
         d += (gapBefore ? "M" : "L") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1) + " ";
         if (gapBefore && gapAfter) mk("circle", {cx: X(p[0]), cy: Y(p[1]), r: 2.4, fill: s.color}, svg);   // lone point
         prev = p[0];
@@ -103,7 +106,7 @@
       series.forEach(function (s) {
         var best = null;
         s.points.forEach(function (p) { if (best === null || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; });
-        if (best && Math.abs(best[0] - t) <= step * 2) {
+        if (best && Math.abs(best[0] - t) <= gap / 2) {
           at = at || best[0];
           rows.push('<span style="color:' + s.color + '">&#9679;</span> ' + s.label + ": <b>" + fmtVal(best[1]) + (opt.unit ? " " + opt.unit : "") + "</b>");
         }
