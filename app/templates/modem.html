@@ -42,7 +42,7 @@
     <a href="{{ url_for('modem_page', wan=wan, tab='signal', range=rng) }}" class="{{ 'on' if tab == 'signal' }}">Signal</a>
     <a href="{{ url_for('modem_page', wan=wan, tab='health', range=rng) }}" class="{{ 'on' if tab == 'health' }}">Health</a>
   </div>
-  <div class="seg">{% for r in ranges %}<a href="{{ url_for('modem_page', wan=wan, tab=tab, range=r) }}" class="{{ 'on' if r == rng }}">{{ r }}</a>{% endfor %}</div>
+  <div class="seg">{% for r, label in ranges.items() %}<a href="{{ url_for('modem_page', wan=wan, tab=tab, range=r) }}" class="{{ 'on' if r == rng }}">{{ label }}</a>{% endfor %}</div>
   <span class="muted" style="font-size: 12.5px;">{% if m.status_age is not none %}Status read {{ m.status_age|dur }} ago{% elif m.last_sample %}Sampled {{ m.last_sample|when }}{% else %}Waiting for the first QManager read{% endif %}{% if s.settings.signal_sample_minutes %} · antenna history every {{ s.settings.signal_sample_minutes }} min{% else %} · sampler off (Settings → Modem){% endif %}</span>
 </div>
 {% if m.sampler_error %}<div class="banner">Signal sampler: {{ m.sampler_error }}</div>{% endif %}
@@ -86,7 +86,7 @@
 {% endif %}
 
 <section class="card" style="margin-top: 16px;">
-  <h2>Signal history <span class="sub">best antenna per technology, last {{ rng }}</span></h2>
+  <h2>Signal history <span class="sub">best antenna per technology, last {{ ranges[rng]|lower }}</span></h2>
   <div class="grid2" style="margin-top: 8px;">
     <div><div class="ct">RSRP <span class="muted">dBm</span></div><div class="chart" id="c-rsrp"></div></div>
     <div><div class="ct">RSRQ <span class="muted">dB</span></div><div class="chart" id="c-rsrq"></div></div>
@@ -122,7 +122,7 @@
 {% if m.slow %}<div class="banner err">{{ m.slow }}</div>{% endif %}
 <div class="grid2">
   {% for title, unit, names in charts %}
-  <section class="card"><h2>{{ title }} <span class="sub">last {{ rng }}{% if title == "Temperature" %}, highest per interval{% endif %}</span></h2>
+  <section class="card"><h2>{{ title }} <span class="sub">last {{ ranges[rng]|lower }}{% if title == "Temperature" %}, highest per interval{% endif %}</span></h2>
     <div class="chart" id="h-{{ loop.index }}"></div></section>
   {% endfor %}
 </div>

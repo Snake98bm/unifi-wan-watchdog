@@ -49,11 +49,14 @@ class WebTests(unittest.TestCase):
         main.modem_store.add_metrics("wan1", now - 600, {"temp": 61, "cpu_temp": 66, "poe_w": 2.8})
         main.modem_store.add_signal("wan1", [{"ts": now - 60, "lte_rsrp": [-71, -72, -140, -140],
                                               "nr_sinr": [15, 22, -20, -20]}])
-        for url in ("/modem", "/modem?tab=health&range=7d", "/modem?range=bad", "/"):
+        for url in ("/modem", "/modem?tab=health&range=7d", "/modem?range=month", "/modem?range=bad", "/"):
             self.assertEqual(self.c.get(url).status_code, 200, url)
         body = self.c.get("/modem").get_data(as_text=True)
         self.assertIn("Signal history", body)
         self.assertIn("No signal", body)                  # -140 is shown as no signal, not "Poor"
+        self.assertIn(">Week</a>", body)
+        self.assertIn(">Month</a>", body)
+        self.assertIn("last month", self.c.get("/modem?tab=health&range=month").get_data(as_text=True))
         d = self.c.get("/api/modem/wan1/series?names=temp,poe_w,bad-name!&range=24h").get_json()
         self.assertEqual(sorted(d), ["poe_w", "temp"])
         self.assertEqual(d["temp"][0][3], 61)

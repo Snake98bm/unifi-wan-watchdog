@@ -279,7 +279,9 @@ def dashboard():
                            schedules=config.SCHEDULES, has_capture=bool(capture_wans()), modems=modem_snaps())
 
 
-RANGES = {"6h": 6, "24h": 24, "7d": 168, "45d": 1080}
+RANGES = {"6h": 6, "day": 24, "week": 168, "month": 720, "45d": 1080}     # chart ranges (hours)
+RANGE_LABELS = {"6h": "6 hours", "day": "Day", "week": "Week", "month": "Month", "45d": "45 days"}
+RANGE_ALIASES = {"24h": "day", "7d": "week", "30d": "month"}               # links from v3.2
 HEALTH_CHARTS = [
     ("Temperature", "°C", [("temp", "QManager"), ("cpu_temp", "CPU"), ("ambient_temp", "Ambient"),
                            ("pa_temp", "Amplifier (AT)"), ("case_temp", "Case (SSH)"), ("pa1_temp", "Amplifier 1 (SSH)"),
@@ -303,15 +305,22 @@ def modem_page():
         return render_template("modem.html", s=s, page="modem", wan=None, wans=[])
     wan = request.args.get("wan") if request.args.get("wan") in wans else wans[0]
     tab = "health" if request.args.get("tab") == "health" else "signal"
-    rng = request.args.get("range") if request.args.get("range") in RANGES else "24h"
+    rng = _range()
     labels = {w["key"]: w["label"] for w in s["wans"]}
     return render_template("modem.html", s=s, page="modem", wan=wan, wans=[(k, labels.get(k, k)) for k in wans],
-                           tab=tab, rng=rng, ranges=list(RANGES), hours=RANGES[rng], m=modem.snapshot(wan), charts=HEALTH_CHARTS,
+                           tab=tab, rng=rng, ranges=RANGE_LABELS, hours=RANGES[rng], m=modem.snapshot(wan), charts=HEALTH_CHARTS,
                            sensors=SSH_SENSORS)
 
 
+def _range():
+    """The chosen chart range (?range=); a day when missing or unknown."""
+    r = request.args.get("range") or ""
+    r = RANGE_ALIASES.get(r, r)
+    return r if r in RANGES else "day"
+
+
 def _hours():
-    return RANGES.get(request.args.get("range"), 24)
+    return RANGES[_range()]
 
 
 @app.get("/api/modem/<wan>/signal")
