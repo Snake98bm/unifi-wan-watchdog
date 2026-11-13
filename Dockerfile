@@ -1,5 +1,5 @@
 FROM python:3.13-alpine
-LABEL org.opencontainers.image.title="wan-watchdog" org.opencontainers.image.version="3.7"
+LABEL org.opencontainers.image.title="wan-watchdog" org.opencontainers.image.version="3.8"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
 # openssh-client: port bounce; su-exec: the probe containers drop from root after their DHCP lease
 RUN apk add --no-cache openssh-client su-exec && adduser -D -u 1000 app && mkdir /data && chown app:app /data
@@ -7,6 +7,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ /app/
+# app icon (favicon, bookmarks, phone home screens), drawn once here into /app/static/icons
+RUN cd /app && python -c "import icon; icon.build()"
 RUN chmod 755 /app/probe-entry.sh
 USER app
 EXPOSE 8080

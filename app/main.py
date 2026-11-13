@@ -4,6 +4,7 @@ Secrets and the gateway address come from environment variables; everything else
 Settings page and saved in /data/settings.json (see config.py).
 """
 import hmac
+import json
 import os
 import re
 import secrets
@@ -13,10 +14,12 @@ import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import (Flask, abort, flash, jsonify, redirect, render_template, request, send_from_directory,
+                   session, url_for)
 from waitress import serve
 
 import config
+import icon
 import pages as modem_pages
 from atparse import fix_old_qcainfo
 from bounce import Bouncer
@@ -214,6 +217,22 @@ def safe_next(nxt):
     if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt or any(ord(c) < 32 for c in nxt):
         return "/"
     return nxt
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(icon.OUT, "favicon.ico", mimetype="image/png", max_age=86400)
+
+
+@app.route("/apple-touch-icon.png")
+@app.route("/apple-touch-icon-precomposed.png")
+def apple_touch_icon():
+    return send_from_directory(icon.OUT, "apple-touch-icon.png", mimetype="image/png", max_age=86400)
+
+
+@app.route("/manifest.webmanifest")
+def web_manifest():
+    return app.response_class(json.dumps(icon.MANIFEST), mimetype="application/manifest+json")
 
 
 @app.route("/login", methods=["GET", "POST"])

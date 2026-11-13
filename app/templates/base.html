@@ -15,6 +15,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<link rel="icon" href="{{ url_for('static', filename='icons/favicon.svg') }}" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#1e293b">
+<meta name="apple-mobile-web-app-title" content="WAN Watchdog">
 <script>
 // theme picked in the sidebar (Auto / Light / Dark), remembered in this browser; set before the page paints
 try { var t = localStorage.getItem("ww-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}

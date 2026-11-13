@@ -13,3 +13,6 @@ known_hosts
 # python
 __pycache__/
 *.pyc
+
+# drawn at image build time by app/icon.py
+app/static/icons/
